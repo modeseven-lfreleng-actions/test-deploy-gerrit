@@ -659,9 +659,24 @@ jobs:
 
       - name: "Verify tunnel connectivity"
         if: inputs.remote_access != 'None'
+        shell: bash
         env:
-          BORE_HOST: ${{ steps.tunnels.outputs.bore_host }}
-          HTTP_PORT: ${{ steps.tunnels.outputs.http_port }}
+          TUNNEL_HOST: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.bore_host ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          HTTP_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.http_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.http_port ||
+              ''
+            }}
           API_PATH: ${{ matrix.server.api_path }}
           MATCH_API_PATH: ${{ inputs.match_api_path }}
           DEBUG: ${{ needs.validate.outputs.effective_debug }}
@@ -677,9 +692,9 @@ jobs:
           fi
 
           if [ -n "$EFFECTIVE_API_PATH" ]; then
-            URL="http://${BORE_HOST}:${HTTP_PORT}${EFFECTIVE_API_PATH}/config/server/version"
+            URL="http://${TUNNEL_HOST}:${HTTP_PORT}${EFFECTIVE_API_PATH}/config/server/version"
           else
-            URL="http://${BORE_HOST}:${HTTP_PORT}/config/server/version"
+            URL="http://${TUNNEL_HOST}:${HTTP_PORT}/config/server/version"
           fi
 
           echo "Testing: $URL"
@@ -702,7 +717,7 @@ jobs:
       - name: "Display connection info"
         env:
           REMOTE_ACCESS: ${{ inputs.remote_access }}
-          TUNNEL_BORE_HOST: >-
+          TUNNEL_HOST: >-
             ${{
               inputs.remote_access == 'Bore' &&
                 steps.tunnels.outputs.bore_host ||
@@ -749,14 +764,14 @@ jobs:
           MATCH_API_PATH: ${{ inputs.match_api_path }}
         run: |
           # Display connection information
-          if [ "$REMOTE_ACCESS" != "None" ] && [ -n "$TUNNEL_BORE_HOST" ]; then
-            BORE_HOST="$TUNNEL_BORE_HOST"
+          if [ "$REMOTE_ACCESS" != "None" ] && [ -n "$TUNNEL_HOST" ]; then
+            REMOTE_HOST="$TUNNEL_HOST"
             HTTP_PORT="$TUNNEL_HTTP_PORT"
             SSH_PORT="$TUNNEL_SSH_PORT"
             LOCAL_HTTP="$TUNNEL_LOCAL_HTTP"
             LOCAL_SSH="$TUNNEL_LOCAL_SSH"
           else
-            BORE_HOST="localhost"
+            REMOTE_HOST="localhost"
             HTTP_PORT="8080"
             SSH_PORT="29418"
             LOCAL_HTTP="8080"
@@ -772,14 +787,14 @@ jobs:
 
           if [ -n "$HTTP_PORT" ]; then
             if [ -n "$EFFECTIVE_API_PATH" ]; then
-              HTTP_URL="http://${BORE_HOST}:${HTTP_PORT}${EFFECTIVE_API_PATH}/"
+              HTTP_URL="http://${REMOTE_HOST}:${HTTP_PORT}${EFFECTIVE_API_PATH}/"
             else
-              HTTP_URL="http://${BORE_HOST}:${HTTP_PORT}/"
+              HTTP_URL="http://${REMOTE_HOST}:${HTTP_PORT}/"
             fi
             TUNNELS+=("http|Web UI|$LOCAL_HTTP|$HTTP_PORT|$HTTP_URL")
           fi
           if [ -n "$SSH_PORT" ]; then
-            SSH_URL="ssh://admin@${BORE_HOST}:${SSH_PORT}"
+            SSH_URL="ssh://admin@${REMOTE_HOST}:${SSH_PORT}"
             TUNNELS+=("ssh|SSH/Git|$LOCAL_SSH|$SSH_PORT|$SSH_URL")
           fi
 
@@ -804,17 +819,18 @@ jobs:
               echo "### Gerrit Web Portal"
               echo ""
               if [ -n "$EFFECTIVE_API_PATH" ]; then
-                echo "**URL**: http://$BORE_HOST:$HTTP_PORT$EFFECTIVE_API_PATH/"
+                echo "**URL**:" \
+                  "http://$REMOTE_HOST:$HTTP_PORT$EFFECTIVE_API_PATH/"
               else
-                echo "**URL**: http://$BORE_HOST:$HTTP_PORT/"
+                echo "**URL**: http://$REMOTE_HOST:$HTTP_PORT/"
               fi
               echo ""
               echo '```bash'
               echo "# Check version"
               if [ -n "$EFFECTIVE_API_PATH" ]; then
-                URL="http://$BORE_HOST:$HTTP_PORT$EFFECTIVE_API_PATH"
+                URL="http://$REMOTE_HOST:$HTTP_PORT$EFFECTIVE_API_PATH"
               else
-                URL="http://$BORE_HOST:$HTTP_PORT"
+                URL="http://$REMOTE_HOST:$HTTP_PORT"
               fi
               echo "curl -s $URL/config/server/version"
               echo ""
@@ -829,10 +845,10 @@ jobs:
               echo ""
               echo '```bash'
               echo "# Test connection"
-              echo "ssh -p $SSH_PORT admin@$BORE_HOST gerrit version"
+              echo "ssh -p $SSH_PORT admin@$REMOTE_HOST gerrit version"
               echo ""
               echo "# Clone a repository"
-              echo "git clone ssh://admin@$BORE_HOST:$SSH_PORT/PROJECT_NAME"
+              echo "git clone ssh://admin@$REMOTE_HOST:$SSH_PORT/PROJECT_NAME"
               echo '```'
               echo ""
             fi
