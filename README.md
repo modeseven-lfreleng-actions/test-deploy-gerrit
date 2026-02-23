@@ -28,22 +28,22 @@ You can trigger the workflow manually with optional parameters:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input | Description | Default |
-| ----- | ----------- | ------- |
-| `debug` | Enable verbose debug output | `false` |
-| `sync_on_startup` | Trigger pull-replication after container startup | `true` |
-| `slug_selector` | Server slug selector (see [Selector Syntax](#selector-syntax)) | `all` |
-| `debug_minutes` | Minutes to keep debug session open (max 60) | `15` |
-| `use_api_path` | Match origin server URL API path | `false` |
-| `enable_tunnel` | Enable tunnel for remote access | `true` |
-| `resync_orgs` | Resync GitHub ORGs with Gerrit content | `false` |
-| `github_selector` | GitHub org selector (see [Selector Syntax](#selector-syntax)) | `all` |
+| Input             | Description                                                                   | Default |
+| ----------------- | ----------------------------------------------------------------------------- | ------- |
+| `debug`           | Enable verbose debug output                                                   | `false` |
+| `sync_on_startup` | Trigger pull-replication after container startup                              | `true`  |
+| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax)) | `onap`  |
+| `persist_minutes`  | Persistent session duration (minutes, max 60)                                 | `15`    |
+| `match_api_path`  | Match origin server URL API path                                              | `true`  |
+| `remote_access`   | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup)) | `None`  |
+| `resync_orgs`     | Resync GitHub ORGs with Gerrit content                                        | `false` |
+| `resync_project_slugs` | Resync these GitHub orgs (slug, see [Selector Syntax](#selector-syntax))      | `all`   |
 
 <!-- markdownlint-enable MD013 -->
 
 ### Selector Syntax
 
-Both `slug_selector` and `github_selector` inputs support flexible matching:
+Both `persist_project_slugs` and `resync_project_slugs` inputs support flexible matching:
 
 | Pattern | Description | Example |
 | ------- | ----------- | ------- |
@@ -56,16 +56,16 @@ Both `slug_selector` and `github_selector` inputs support flexible matching:
 
 ```bash
 # Match ONAP servers/orgs
-slug_selector: "onap"
+persist_project_slugs: "onap"
 
 # Match specific servers
-slug_selector: "onap, oran, lf"
+persist_project_slugs: "onap, oran, lf"
 
 # Match all gerrit-prefixed GitHub orgs
-github_selector: "*gerrit*"
+resync_project_slugs: "*gerrit*"
 
 # Match ONAP and O-RAN-SC orgs (both regular and gerrit variants)
-github_selector: "modeseven-onap, modeseven-gerrit-onap, modeseven-o-ran-sc"
+resync_project_slugs: "modeseven-onap, modeseven-gerrit-onap, modeseven-o-ran-sc"
 ```
 
 ### Resync GitHub Organizations
@@ -76,22 +76,24 @@ When you enable `resync_orgs`, the workflow will:
 2. **Mirror**: Clone all content from the corresponding Gerrit server and push
    to GitHub
 
-This uses the [gerrit-clone-action](https://github.com/lfreleng-actions/gerrit-clone-action)
-CLI tool to perform bulk operations.
+This uses the [gerrit-clone](https://github.com/lfreleng-actions/gerrit-clone-action)
+CLI tool (invoked via `uvx gerrit-clone`) to perform bulk operations. The
+resync jobs run **completely in parallel** with the Gerrit server deployment
+and sync/test jobs — they share no dependencies and do not block each other.
 
 **⚠️ WARNING**: This is a destructive operation! The workflow deletes
 all existing repositories in the target GitHub organizations before mirroring.
 
-Use `github_selector` to select specific organizations:
+Use `resync_project_slugs` to select specific organizations:
 
 ```bash
 # Resync ONAP organizations
 resync_orgs: true
-github_selector: "*onap*"
+resync_project_slugs: "*onap*"
 
 # Resync gerrit-specific organizations
 resync_orgs: true
-github_selector: "*gerrit*"
+resync_project_slugs: "*gerrit*"
 ```
 
 ## Configuration
