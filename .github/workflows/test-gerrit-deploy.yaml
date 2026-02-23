@@ -45,11 +45,15 @@ on:
         options:
           - "true"
           - "false"
-      enable_tunnel:
-        description: "Enable tunnel for remote access"
+      remote_access:
+        description: "Enable remote Gerrit access"
         required: false
-        default: true
-        type: boolean
+        default: "None"
+        type: choice
+        options:
+          - "None"
+          - "Bore"
+          - "Tailscale"
       resync_orgs:
         description: "Resync GitHub ORGs with Gerrit"
         required: false
@@ -389,7 +393,7 @@ jobs:
 
       - name: "Calculate local ports"
         id: ports
-        if: inputs.enable_tunnel
+        if: inputs.remote_access != 'None'
         env:
           SERVER_SLUG: ${{ matrix.server.slug }}
           DEBUG_MATRIX: ${{ needs.prepare.outputs.debug_matrix }}
@@ -418,7 +422,7 @@ jobs:
           echo "  SSH:  $SSH_PORT"
 
       - name: "Install bore"
-        if: inputs.enable_tunnel
+        if: inputs.remote_access == 'Bore'
         run: |
           # Install bore TCP tunnel client
           BORE_VERSION="0.5.2"
@@ -434,7 +438,7 @@ jobs:
 
       - name: "Start bore tunnels"
         id: tunnels
-        if: inputs.enable_tunnel
+        if: inputs.remote_access == 'Bore'
         env:
           LOCAL_HTTP: ${{ steps.ports.outputs.http_port }}
           LOCAL_SSH: ${{ steps.ports.outputs.ssh_port }}
@@ -555,6 +559,53 @@ jobs:
           fi
 
       # ================================================================
+      # TAILSCALE SETUP (optional, before Gerrit)
+      # ================================================================
+
+      - name: "Connect to Tailscale"
+        id: tailscale
+        if: inputs.remote_access == 'Tailscale'
+        # yamllint disable-line rule:line-length
+        uses: tailscale/github-action@53acf823325fe9ca47f4cdaa951f90b4b0de5bb9  # v4.1.1
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: "gerrit-ci-${{ matrix.server.slug }}"
+
+      - name: "Configure Tailscale tunnel"
+        id: tailscale-tunnel
+        if: inputs.remote_access == 'Tailscale'
+        env:
+          LOCAL_HTTP: ${{ steps.ports.outputs.http_port }}
+          LOCAL_SSH: ${{ steps.ports.outputs.ssh_port }}
+          SERVER_SLUG: ${{ matrix.server.slug }}
+        run: |
+          # Get Tailscale IP and build tunnel configuration
+          TS_IP=$(tailscale ip -4)
+          echo "Tailscale IPv4: $TS_IP"
+
+          # With Tailscale, local ports are directly accessible (no translation)
+          TUNNEL_PORTS=$(jq -c -n \
+            --arg slug "$SERVER_SLUG" \
+            --argjson http "$LOCAL_HTTP" \
+            --argjson ssh "$LOCAL_SSH" \
+            '{($slug): {http: $http, ssh: $ssh}}')
+
+          {
+            echo "tailscale_ip=$TS_IP"
+            echo "http_port=$LOCAL_HTTP"
+            echo "ssh_port=$LOCAL_SSH"
+            echo "local_http_port=$LOCAL_HTTP"
+            echo "local_ssh_port=$LOCAL_SSH"
+            echo "tunnel_ports=$TUNNEL_PORTS"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Tailscale tunnel configured ✅"
+          echo "  HTTP: $TS_IP:$LOCAL_HTTP"
+          echo "  SSH:  $TS_IP:$LOCAL_SSH"
+
+      # ================================================================
       # START GERRIT
       # ================================================================
 
@@ -580,56 +631,133 @@ jobs:
           debug: ${{ needs.validate.outputs.effective_debug }}
           check_service: true
           exit: false
-          tunnel_host: ${{ inputs.enable_tunnel && 'bore.pub' || '' }}
-          tunnel_ports: ${{ steps.tunnels.outputs.tunnel_ports }}
+          tunnel_host: >-
+            ${{
+              inputs.remote_access == 'Bore' && 'bore.pub' ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          tunnel_ports: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.tunnel_ports ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tunnel_ports ||
+              ''
+            }}
 
       - name: "Verify tunnel connectivity"
-        if: inputs.enable_tunnel
+        if: inputs.remote_access != 'None'
+        shell: bash
         env:
-          BORE_HOST: ${{ steps.tunnels.outputs.bore_host }}
-          HTTP_PORT: ${{ steps.tunnels.outputs.http_port }}
+          BORE_HOST: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.bore_host ||
+              steps.tailscale-tunnel.outputs.tailscale_ip
+            }}
+          HTTP_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.http_port ||
+              steps.tailscale-tunnel.outputs.http_port
+            }}
           API_PATH: ${{ matrix.server.api_path }}
           USE_API_PATH: ${{ inputs.use_api_path }}
+          DEBUG: ${{ needs.validate.outputs.effective_debug }}
+          MAX_ATTEMPTS: "5"
+          RETRY_DELAY: "3"
         run: |
-          # Verify the tunnel is working by hitting Gerrit through it
-          echo "Verifying tunnel connectivity..."
-
-          EFFECTIVE_API_PATH=""
-          if [ "${USE_API_PATH:-false}" = "true" ] && [ -n "$API_PATH" ]; then
-            EFFECTIVE_API_PATH="$API_PATH"
+          # Verify tunnel connectivity
+          SCRIPT_PATH="${GITHUB_ACTION_PATH:-}"
+          if [ -z "$SCRIPT_PATH" ]; then
+            SCRIPT_PATH="$(find \
+              /home/runner/work/_actions \
+              -path '*/gerrit-action/*/scripts/verify-tunnel.py' \
+              2>/dev/null | head -1)"
+            SCRIPT_PATH="$(dirname \
+              "$(dirname "$SCRIPT_PATH")")"
           fi
 
-          if [ -n "$EFFECTIVE_API_PATH" ]; then
-            URL="http://${BORE_HOST}:${HTTP_PORT}${EFFECTIVE_API_PATH}/config/server/version"
+          if [ -f "$SCRIPT_PATH/scripts/verify-tunnel.py" ]; then
+            python3 "$SCRIPT_PATH/scripts/verify-tunnel.py"
           else
-            URL="http://${BORE_HOST}:${HTTP_PORT}/config/server/version"
-          fi
-
-          echo "Testing: $URL"
-
-          MAX_ATTEMPTS=5
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
-            if echo "$HTTP_CODE" | grep -q "200"; then
-              VERSION=$(curl -s "$URL" | tr -d '")' | tail -1)
-              echo "Tunnel verified ✅ (Gerrit $VERSION)"
-              exit 0
+            echo "::warning::verify-tunnel.py not found" \
+              "at $SCRIPT_PATH/scripts/"
+            URL="http://${BORE_HOST}:${HTTP_PORT}"
+            if [ "${USE_API_PATH:-false}" = "true" ] \
+                && [ -n "$API_PATH" ]; then
+              URL="${URL}${API_PATH}"
             fi
-            echo "  Attempt $i/$MAX_ATTEMPTS failed, retrying..."
-            sleep 3
-          done
-
-          echo "::warning::Could not verify tunnel connectivity"
-          echo "Gerrit may still be starting up"
+            URL="${URL}/config/server/version"
+            echo "Testing: $URL"
+            MAX="${MAX_ATTEMPTS:-5}"
+            DELAY="${RETRY_DELAY:-3}"
+            for i in $(seq 1 "$MAX"); do
+              HTTP_CODE=$(curl -s -o /dev/null \
+                -w "%{http_code}" \
+                --connect-timeout 10 "$URL" 2>&1)
+              CURL_EXIT=$?
+              if [ "$HTTP_CODE" = "200" ]; then
+                VERSION=$(curl -s "$URL" \
+                  | tr -d '")' | tail -1)
+                echo "Tunnel verified ✅ ($VERSION)"
+                exit 0
+              fi
+              echo "  Attempt $i/$MAX:" \
+                "HTTP=$HTTP_CODE exit=$CURL_EXIT"
+              sleep "$DELAY"
+            done
+            echo "::error::Tunnel verify failed" \
+              "after $MAX attempts" \
+              "(HTTP=$HTTP_CODE, exit=$CURL_EXIT)"
+            exit 1
+          fi
 
       - name: "Display connection info"
         env:
-          USE_BORE: ${{ inputs.enable_tunnel }}
-          TUNNEL_BORE_HOST: ${{ steps.tunnels.outputs.bore_host }}
-          TUNNEL_HTTP_PORT: ${{ steps.tunnels.outputs.http_port }}
-          TUNNEL_SSH_PORT: ${{ steps.tunnels.outputs.ssh_port }}
-          TUNNEL_LOCAL_HTTP: ${{ steps.tunnels.outputs.local_http_port }}
-          TUNNEL_LOCAL_SSH: ${{ steps.tunnels.outputs.local_ssh_port }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
+          TUNNEL_BORE_HOST: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.bore_host ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          TUNNEL_HTTP_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.http_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.http_port ||
+              ''
+            }}
+          TUNNEL_SSH_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.ssh_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.ssh_port ||
+              ''
+            }}
+          TUNNEL_LOCAL_HTTP: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.local_http_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.local_http_port ||
+              ''
+            }}
+          TUNNEL_LOCAL_SSH: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.local_ssh_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.local_ssh_port ||
+              ''
+            }}
           DEBUG_MINUTES: ${{ needs.validate.outputs.debug_minutes }}
           SERVER_NAME: ${{ matrix.server.name }}
           API_PATH: ${{ matrix.server.api_path }}
@@ -637,7 +765,7 @@ jobs:
           USE_API_PATH: ${{ inputs.use_api_path }}
         run: |
           # Display connection information
-          if [ "$USE_BORE" = "true" ]; then
+          if [ "$REMOTE_ACCESS" != "None" ]; then
             BORE_HOST="$TUNNEL_BORE_HOST"
             HTTP_PORT="$TUNNEL_HTTP_PORT"
             SSH_PORT="$TUNNEL_SSH_PORT"
@@ -736,10 +864,12 @@ jobs:
               2>/dev/null || date -v+"${DEBUG_MINUTES}"M "$DATE_FMT")
             echo "| Expires | $EXPIRY |"
             echo ""
-            if [ "$USE_BORE" = "true" ]; then
-              echo "> ⚠️ **Warning**: URLs are publicly accessible!"
+            if [ "$REMOTE_ACCESS" = "Bore" ]; then
+              echo "> ⚠️ **Warning**: URLs are publicly accessible via bore!"
+            elif [ "$REMOTE_ACCESS" = "Tailscale" ]; then
+              echo "> 🔒 **Note**: Access restricted to Tailscale network"
             else
-              echo "> ℹ️ **Note**: Local access only (external tunnel disabled)"
+              echo "> ℹ️ **Note**: Local access only (remote access disabled)"
             fi
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -759,7 +889,7 @@ jobs:
       - name: "Keep session alive"
         env:
           DEBUG_MINUTES: ${{ needs.validate.outputs.debug_minutes }}
-          USE_BORE: ${{ inputs.enable_tunnel }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
         run: |
           # Keep the session alive for the specified duration
           echo "Session will remain active for $DEBUG_MINUTES minutes..."
@@ -774,13 +904,17 @@ jobs:
             REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
             echo "[$(date '+%H:%M:%S')] $REMAINING minutes remaining..."
 
-            if [ "$USE_BORE" = "true" ]; then
+            if [ "$REMOTE_ACCESS" = "Bore" ]; then
               if ! pgrep -f "bore local" > /dev/null; then
                 echo "::warning::bore tunnels have stopped unexpectedly"
                 echo "HTTP tunnel log:"
                 cat bore-http.log 2>/dev/null || echo "(no log)"
                 echo "SSH tunnel log:"
                 cat bore-ssh.log 2>/dev/null || echo "(no log)"
+              fi
+            elif [ "$REMOTE_ACCESS" = "Tailscale" ]; then
+              if ! tailscale status > /dev/null 2>&1; then
+                echo "::warning::Tailscale connection lost"
               fi
             fi
 
@@ -794,14 +928,15 @@ jobs:
         if: always()
         env:
           CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
-          USE_BORE: ${{ inputs.enable_tunnel }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
         run: |
           # Cleanup tunnels and containers
           echo "Cleaning up..."
 
-          if [ "$USE_BORE" = "true" ]; then
+          if [ "$REMOTE_ACCESS" = "Bore" ]; then
             pkill -f "bore local" 2>/dev/null || true
           fi
+          # Note: Tailscale cleanup is handled by its action's post step
 
           if [ -n "$CONTAINER_IDS" ]; then
             echo "$CONTAINER_IDS" | jq -r '.[]' 2>/dev/null | \
