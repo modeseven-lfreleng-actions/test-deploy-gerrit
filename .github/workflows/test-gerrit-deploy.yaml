@@ -101,11 +101,13 @@ jobs:
             exit 1
           fi
           if [ "$PERSIST_MINUTES" -gt 60 ]; then
-            echo "::warning::persist_minutes capped at 60 (was: $PERSIST_MINUTES)"
+            echo "::warning::persist_minutes capped" \
+              "at 60 (was: $PERSIST_MINUTES)"
             PERSIST_MINUTES=60
           fi
           if [ "$PERSIST_MINUTES" -lt 5 ]; then
-            echo "::warning::persist_minutes minimum is 5 (was: $PERSIST_MINUTES)"
+            echo "::warning::persist_minutes min" \
+              "is 5 (was: $PERSIST_MINUTES)"
             PERSIST_MINUTES=5
           fi
           echo "persist_minutes=$PERSIST_MINUTES" >> "$GITHUB_OUTPUT"
@@ -176,15 +178,18 @@ jobs:
           echo "Full matrix prepared with $COUNT Gerrit servers"
 
           # Output filtered matrix for debug tests
-          if [ -z "$PERSIST_PROJECT_SLUGS" ] || [ "$PERSIST_PROJECT_SLUGS" = "all" ]; then
+          if [ -z "$PERSIST_PROJECT_SLUGS" ] || \
+             [ "$PERSIST_PROJECT_SLUGS" = "all" ]; then
             # Empty selector or "all" = all servers
             DEBUG_MATRIX="$MATRIX"
             echo "Debug matrix: all $COUNT servers (no selector)"
           else
             # Parse comma/space-separated selectors and support wildcards
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$PERSIST_PROJECT_SLUGS" | tr ',' '\n' | tr ' ' '\n' | \
-              sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+            SELECTORS=$(echo "$PERSIST_PROJECT_SLUGS" \
+              | tr ',' '\n' | tr ' ' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -v '^$')
 
             echo "Selectors to match:"
             echo "$SELECTORS"
@@ -210,7 +215,8 @@ jobs:
             ')
             DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
             if [ "$DEBUG_COUNT" -eq 0 ]; then
-              echo "::error::No servers matched selector: $PERSIST_PROJECT_SLUGS"
+              echo "::error::No servers matched" \
+                "selector: $PERSIST_PROJECT_SLUGS"
               echo "Available slugs:"
               echo "$GERRIT_SERVERS" | jq -r '.[].slug'
               exit 1
@@ -567,7 +573,7 @@ jobs:
         id: tailscale
         if: inputs.remote_access == 'Tailscale'
         # yamllint disable-line rule:line-length
-        uses: tailscale/github-action@53acf823325fe9ca47f4cdaa951f90b4b0de5bb9  # v3
+        uses: tailscale/github-action@53acf823325fe9ca47f4cdaa951f90b4b0de5bb9  # v4.1.1
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
@@ -984,15 +990,18 @@ jobs:
           echo "Full matrix has $FULL_COUNT GitHub organizations"
 
           # Apply resync_project_slugs filter
-          if [ -z "$RESYNC_PROJECT_SLUGS" ] || [ "$RESYNC_PROJECT_SLUGS" = "all" ]; then
+          if [ -z "$RESYNC_PROJECT_SLUGS" ] || \
+             [ "$RESYNC_PROJECT_SLUGS" = "all" ]; then
             # Empty selector or "all" = all orgs
             MATRIX="$FULL_MATRIX"
             echo "Using all $FULL_COUNT GitHub organizations (no selector)"
           else
             # Parse comma/space-separated selectors and support wildcards
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$RESYNC_PROJECT_SLUGS" | tr ',' '\n' | tr ' ' '\n' | \
-              sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+            SELECTORS=$(echo "$RESYNC_PROJECT_SLUGS" \
+              | tr ',' '\n' | tr ' ' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -v '^$')
 
             echo "GitHub org selectors to match:"
             echo "$SELECTORS"
@@ -1017,7 +1026,8 @@ jobs:
             ')
             MATCH_COUNT=$(echo "$MATRIX" | jq '. | length')
             if [ "$MATCH_COUNT" -eq 0 ]; then
-              echo "::error::No GitHub orgs matched selector: $RESYNC_PROJECT_SLUGS"
+              echo "::error::No GitHub orgs matched" \
+                "selector: $RESYNC_PROJECT_SLUGS"
               echo "Available GitHub organizations:"
               echo "$FULL_MATRIX" | jq -r '.[].github_org'
               exit 1
@@ -1099,9 +1109,11 @@ jobs:
             TOTAL_COUNT=0
           fi
 
-          echo "success-count=$SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
-          echo "failure-count=$FAILURE_COUNT" >> "$GITHUB_OUTPUT"
-          echo "total-count=$TOTAL_COUNT" >> "$GITHUB_OUTPUT"
+          {
+            echo "success-count=$SUCCESS_COUNT"
+            echo "failure-count=$FAILURE_COUNT"
+            echo "total-count=$TOTAL_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: "Report results"
         if: always()
