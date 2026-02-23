@@ -38,7 +38,7 @@ on:
         type: number
       match_api_path:
         # e.g., /r, /infra
-        description: "Match origin server URL API path"
+        description: "Match origin server API URL/path"
         required: false
         default: "true"
         type: choice
@@ -1085,7 +1085,16 @@ jobs:
           ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
         run: |
-          # Reset (delete all repositories from) the GitHub organization
+          # Verify token is available
+          if [ -z "$ORG_ADMIN_TOKEN" ]; then
+            echo "::error::ORG_ADMIN_TOKEN secret" \
+              "is not set or empty"
+            exit 1
+          fi
+          echo "Token available:" \
+            "${#ORG_ADMIN_TOKEN} chars"
+
+          # Reset (delete all repos from) the GitHub org
           echo "Resetting GitHub org: $GITHUB_ORG"
           uvx gerrit-clone reset \
             --org "$GITHUB_ORG" \
@@ -1101,7 +1110,14 @@ jobs:
           GERRIT_SERVER: ${{ matrix.org.gerrit }}
           MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
         run: |
-          # Mirror all repositories from Gerrit to GitHub
+          # Verify token is available
+          if [ -z "$ORG_ADMIN_TOKEN" ]; then
+            echo "::error::ORG_ADMIN_TOKEN secret" \
+              "is not set or empty"
+            exit 1
+          fi
+
+          # Mirror all repos from Gerrit to GitHub
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
           uvx gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
