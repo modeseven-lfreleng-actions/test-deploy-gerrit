@@ -25,18 +25,18 @@ on:
         options:
           - "true"
           - "false"
-      slug_selector:
+      persist_project_slugs:
         # Supports: 'all', single value, comma/space-separated, wildcards (*,?)
-        description: "Persistent project selector (slug)"
+        description: "Persistent session selector (project slug)"
         required: false
         default: "onap"
         type: string
-      debug_minutes:
-        description: "Minutes to keep debug session open (max 60)"
+      persist_minutes:
+        description: "Persistent session duration (minutes, max 60)"
         required: false
         default: 15
         type: number
-      use_api_path:
+      match_api_path:
         # e.g., /r, /infra
         description: "Match origin server URL API path"
         required: false
@@ -45,19 +45,24 @@ on:
         options:
           - "true"
           - "false"
-      enable_tunnel:
-        description: "Enable tunnel for remote access"
+      remote_access:
+        # Makes Gerrit instance accessible from outside GitHub
+        description: "Enable remote Gerrit access"
         required: false
-        default: true
-        type: boolean
+        default: "None"
+        type: choice
+        options:
+          - "None"
+          - "Bore"
+          - "Tailscale"
       resync_orgs:
         description: "Resync GitHub ORGs with Gerrit"
         required: false
         default: false
         type: boolean
-      github_selector:
+      resync_project_slugs:
         # Supports: 'all', single value, comma/space-separated, wildcards (*,?)
-        description: "Clear these GitHub orgs (slug)"
+        description: "Resync these GitHub orgs (slug)"
         required: false
         default: "all"
         type: string
@@ -77,34 +82,36 @@ jobs:
     permissions:
       contents: read
     outputs:
-      debug_minutes: ${{ steps.validate.outputs.debug_minutes }}
+      persist_minutes: ${{ steps.validate.outputs.persist_minutes }}
       effective_debug: ${{ steps.validate.outputs.effective_debug }}
     steps:
-      - name: "Validate debug_minutes"
+      - name: "Validate persist_minutes"
         id: validate
         env:
-          DEBUG_MINUTES: ${{ inputs.debug_minutes || 15 }}
+          PERSIST_MINUTES: ${{ inputs.persist_minutes || 15 }}
           DEBUG_INPUT: ${{ inputs.debug || 'false' }}
           # RUNNER_DEBUG is set to '1' when re-running with debug logging
           RUNNER_DEBUG: ${{ runner.debug }}
           # ACTIONS_STEP_DEBUG is 'true' when step debug logging is enabled
           ACTIONS_STEP_DEBUG: ${{ secrets.ACTIONS_STEP_DEBUG }}
         run: |
-          # Validate debug_minutes input
-          if ! [[ "$DEBUG_MINUTES" =~ ^[0-9]+$ ]]; then
-            echo "::error::debug_minutes must be an integer: $DEBUG_MINUTES"
+          # Validate persist_minutes input
+          if ! [[ "$PERSIST_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::persist_minutes must be an integer: $PERSIST_MINUTES"
             exit 1
           fi
-          if [ "$DEBUG_MINUTES" -gt 60 ]; then
-            echo "::warning::debug_minutes capped at 60 (was: $DEBUG_MINUTES)"
-            DEBUG_MINUTES=60
+          if [ "$PERSIST_MINUTES" -gt 60 ]; then
+            echo "::warning::persist_minutes capped" \
+              "at 60 (was: $PERSIST_MINUTES)"
+            PERSIST_MINUTES=60
           fi
-          if [ "$DEBUG_MINUTES" -lt 5 ]; then
-            echo "::warning::debug_minutes minimum is 5 (was: $DEBUG_MINUTES)"
-            DEBUG_MINUTES=5
+          if [ "$PERSIST_MINUTES" -lt 5 ]; then
+            echo "::warning::persist_minutes min" \
+              "is 5 (was: $PERSIST_MINUTES)"
+            PERSIST_MINUTES=5
           fi
-          echo "debug_minutes=$DEBUG_MINUTES" >> "$GITHUB_OUTPUT"
-          echo "Validated debug_minutes: $DEBUG_MINUTES"
+          echo "persist_minutes=$PERSIST_MINUTES" >> "$GITHUB_OUTPUT"
+          echo "Validated persist_minutes: $PERSIST_MINUTES"
 
           # Compute effective debug: true if input OR runner debug is enabled
           # GitHub sets RUNNER_DEBUG=1 and/or ACTIONS_STEP_DEBUG=true when
@@ -150,7 +157,7 @@ jobs:
           # GERRIT_SERVERS is a repository variable (not secret) containing:
           # [{"project":"ONAP","slug":"onap","gerrit":"gerrit.onap.org",...}]
           GERRIT_SERVERS: ${{ vars.GERRIT_SERVERS }}
-          SLUG_SELECTOR: ${{ inputs.slug_selector }}
+          PERSIST_PROJECT_SLUGS: ${{ inputs.persist_project_slugs }}
         run: |
           # Set matrix from GERRIT_SERVERS repository variable
           if [ -z "$GERRIT_SERVERS" ]; then
@@ -171,15 +178,18 @@ jobs:
           echo "Full matrix prepared with $COUNT Gerrit servers"
 
           # Output filtered matrix for debug tests
-          if [ -z "$SLUG_SELECTOR" ] || [ "$SLUG_SELECTOR" = "all" ]; then
+          if [ -z "$PERSIST_PROJECT_SLUGS" ] || \
+             [ "$PERSIST_PROJECT_SLUGS" = "all" ]; then
             # Empty selector or "all" = all servers
             DEBUG_MATRIX="$MATRIX"
             echo "Debug matrix: all $COUNT servers (no selector)"
           else
             # Parse comma/space-separated selectors and support wildcards
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$SLUG_SELECTOR" | tr ',' '\n' | tr ' ' '\n' | \
-              sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+            SELECTORS=$(echo "$PERSIST_PROJECT_SLUGS" \
+              | tr ',' '\n' | tr ' ' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -v '^$')
 
             echo "Selectors to match:"
             echo "$SELECTORS"
@@ -205,12 +215,13 @@ jobs:
             ')
             DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
             if [ "$DEBUG_COUNT" -eq 0 ]; then
-              echo "::error::No servers matched selector: $SLUG_SELECTOR"
+              echo "::error::No servers matched" \
+                "selector: $PERSIST_PROJECT_SLUGS"
               echo "Available slugs:"
               echo "$GERRIT_SERVERS" | jq -r '.[].slug'
               exit 1
             fi
-            echo "Debug matrix: $DEBUG_COUNT server(s) [$SLUG_SELECTOR]"
+            echo "Debug matrix: $DEBUG_COUNT server(s) [$PERSIST_PROJECT_SLUGS]"
           fi
           echo "debug_matrix=$DEBUG_MATRIX" >> "$GITHUB_OUTPUT"
           DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
@@ -326,7 +337,7 @@ jobs:
     name: "Persist: ${{ matrix.server.name }}"
     runs-on: ubuntu-latest
     needs: [validate, prepare]
-    if: needs.validate.outputs.debug_minutes != '0'
+    if: needs.validate.outputs.persist_minutes != '0'
     permissions:
       contents: read
     timeout-minutes: 65
@@ -389,7 +400,7 @@ jobs:
 
       - name: "Calculate local ports"
         id: ports
-        if: inputs.enable_tunnel
+        if: inputs.remote_access != 'None'
         env:
           SERVER_SLUG: ${{ matrix.server.slug }}
           DEBUG_MATRIX: ${{ needs.prepare.outputs.debug_matrix }}
@@ -418,7 +429,7 @@ jobs:
           echo "  SSH:  $SSH_PORT"
 
       - name: "Install bore"
-        if: inputs.enable_tunnel
+        if: inputs.remote_access == 'Bore'
         run: |
           # Install bore TCP tunnel client
           BORE_VERSION="0.5.2"
@@ -434,7 +445,7 @@ jobs:
 
       - name: "Start bore tunnels"
         id: tunnels
-        if: inputs.enable_tunnel
+        if: inputs.remote_access == 'Bore'
         env:
           LOCAL_HTTP: ${{ steps.ports.outputs.http_port }}
           LOCAL_SSH: ${{ steps.ports.outputs.ssh_port }}
@@ -555,6 +566,56 @@ jobs:
           fi
 
       # ================================================================
+      # TAILSCALE SETUP (optional, before Gerrit)
+      # ================================================================
+
+      - name: "Connect to Tailscale"
+        id: tailscale
+        if: inputs.remote_access == 'Tailscale'
+        # yamllint disable-line rule:line-length
+        uses: tailscale/github-action@53acf823325fe9ca47f4cdaa951f90b4b0de5bb9  # v4.1.1
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: gerrit-ci-${{ matrix.server.slug }}
+
+      - name: "Configure Tailscale tunnels"
+        id: tailscale-tunnel
+        if: inputs.remote_access == 'Tailscale'
+        env:
+          LOCAL_HTTP: ${{ steps.ports.outputs.http_port }}
+          LOCAL_SSH: ${{ steps.ports.outputs.ssh_port }}
+          SERVER_SLUG: ${{ matrix.server.slug }}
+        run: |
+          # Get Tailscale IP and configure tunnel info
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "Tailscale IP: $TAILSCALE_IP"
+
+          HTTP_PORT="${LOCAL_HTTP}"
+          SSH_PORT="${LOCAL_SSH}"
+
+          # Build tunnel_ports JSON matching gerrit-action format
+          TUNNEL_PORTS=$(jq -c -n \
+            --arg slug "$SERVER_SLUG" \
+            --argjson http "$HTTP_PORT" \
+            --argjson ssh "$SSH_PORT" \
+            '{($slug): {http: $http, ssh: $ssh}}')
+
+          {
+            echo "tailscale_ip=$TAILSCALE_IP"
+            echo "http_port=$HTTP_PORT"
+            echo "ssh_port=$SSH_PORT"
+            echo "local_http_port=$LOCAL_HTTP"
+            echo "local_ssh_port=$LOCAL_SSH"
+            echo "tunnel_ports=$TUNNEL_PORTS"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Tailscale tunnel configured ✅"
+          echo "  HTTP: $TAILSCALE_IP:$HTTP_PORT"
+          echo "  SSH:  $TAILSCALE_IP:$SSH_PORT"
+
+      # ================================================================
       # START GERRIT
       # ================================================================
 
@@ -576,26 +637,42 @@ jobs:
           ssh_auth_keys: ${{ vars.GERRIT_PUBLIC_KEYS }}
           ssh_auth_username: 'modesevenindustrialsolutions'
           sync_on_startup: ${{ inputs.sync_on_startup }}
-          use_api_path: ${{ inputs.use_api_path }}
+          use_api_path: ${{ inputs.match_api_path }}
           debug: ${{ needs.validate.outputs.effective_debug }}
           check_service: true
           exit: false
-          tunnel_host: ${{ inputs.enable_tunnel && 'bore.pub' || '' }}
-          tunnel_ports: ${{ steps.tunnels.outputs.tunnel_ports }}
+          tunnel_host: >-
+            ${{
+              inputs.remote_access == 'Bore' && 'bore.pub' ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          tunnel_ports: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.tunnel_ports ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tunnel_ports ||
+              ''
+            }}
 
       - name: "Verify tunnel connectivity"
-        if: inputs.enable_tunnel
+        if: inputs.remote_access != 'None'
         env:
           BORE_HOST: ${{ steps.tunnels.outputs.bore_host }}
           HTTP_PORT: ${{ steps.tunnels.outputs.http_port }}
           API_PATH: ${{ matrix.server.api_path }}
-          USE_API_PATH: ${{ inputs.use_api_path }}
+          MATCH_API_PATH: ${{ inputs.match_api_path }}
+          DEBUG: ${{ needs.validate.outputs.effective_debug }}
+          MAX_ATTEMPTS: "5"
+          RETRY_DELAY: "3"
         run: |
           # Verify the tunnel is working by hitting Gerrit through it
           echo "Verifying tunnel connectivity..."
 
           EFFECTIVE_API_PATH=""
-          if [ "${USE_API_PATH:-false}" = "true" ] && [ -n "$API_PATH" ]; then
+          if [ "${MATCH_API_PATH:-false}" = "true" ] && [ -n "$API_PATH" ]; then
             EFFECTIVE_API_PATH="$API_PATH"
           fi
 
@@ -624,20 +701,55 @@ jobs:
 
       - name: "Display connection info"
         env:
-          USE_BORE: ${{ inputs.enable_tunnel }}
-          TUNNEL_BORE_HOST: ${{ steps.tunnels.outputs.bore_host }}
-          TUNNEL_HTTP_PORT: ${{ steps.tunnels.outputs.http_port }}
-          TUNNEL_SSH_PORT: ${{ steps.tunnels.outputs.ssh_port }}
-          TUNNEL_LOCAL_HTTP: ${{ steps.tunnels.outputs.local_http_port }}
-          TUNNEL_LOCAL_SSH: ${{ steps.tunnels.outputs.local_ssh_port }}
-          DEBUG_MINUTES: ${{ needs.validate.outputs.debug_minutes }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
+          TUNNEL_BORE_HOST: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.bore_host ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          TUNNEL_HTTP_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.http_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.http_port ||
+              ''
+            }}
+          TUNNEL_SSH_PORT: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.ssh_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.ssh_port ||
+              ''
+            }}
+          TUNNEL_LOCAL_HTTP: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.local_http_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.local_http_port ||
+              ''
+            }}
+          TUNNEL_LOCAL_SSH: >-
+            ${{
+              inputs.remote_access == 'Bore' &&
+                steps.tunnels.outputs.local_ssh_port ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.local_ssh_port ||
+              ''
+            }}
+          PERSIST_MINUTES: ${{ needs.validate.outputs.persist_minutes }}
           SERVER_NAME: ${{ matrix.server.name }}
           API_PATH: ${{ matrix.server.api_path }}
           SERVER_SLUG: ${{ matrix.server.slug }}
-          USE_API_PATH: ${{ inputs.use_api_path }}
+          MATCH_API_PATH: ${{ inputs.match_api_path }}
         run: |
           # Display connection information
-          if [ "$USE_BORE" = "true" ]; then
+          if [ "$REMOTE_ACCESS" != "None" ] && [ -n "$TUNNEL_BORE_HOST" ]; then
             BORE_HOST="$TUNNEL_BORE_HOST"
             HTTP_PORT="$TUNNEL_HTTP_PORT"
             SSH_PORT="$TUNNEL_SSH_PORT"
@@ -654,7 +766,7 @@ jobs:
           declare -a TUNNELS=()
 
           EFFECTIVE_API_PATH=""
-          if [ "${USE_API_PATH:-false}" = "true" ] && [ -n "$API_PATH" ]; then
+          if [ "${MATCH_API_PATH:-false}" = "true" ] && [ -n "$API_PATH" ]; then
             EFFECTIVE_API_PATH="$API_PATH"
           fi
 
@@ -730,16 +842,16 @@ jobs:
             echo "| Property | Value |"
             echo "|----------|-------|"
             echo "| Server | $SERVER_NAME (\`$SERVER_SLUG\`) |"
-            echo "| Duration | $DEBUG_MINUTES minutes |"
+            echo "| Duration | $PERSIST_MINUTES minutes |"
             DATE_FMT='+%Y-%m-%d %H:%M:%S %Z'
-            EXPIRY=$(date -d "+$DEBUG_MINUTES minutes" "$DATE_FMT" \
-              2>/dev/null || date -v+"${DEBUG_MINUTES}"M "$DATE_FMT")
+            EXPIRY=$(date -d "+$PERSIST_MINUTES minutes" "$DATE_FMT" \
+              2>/dev/null || date -v+"${PERSIST_MINUTES}"M "$DATE_FMT")
             echo "| Expires | $EXPIRY |"
             echo ""
-            if [ "$USE_BORE" = "true" ]; then
+            if [ "$REMOTE_ACCESS" != "None" ]; then
               echo "> ⚠️ **Warning**: URLs are publicly accessible!"
             else
-              echo "> ℹ️ **Note**: Local access only (external tunnel disabled)"
+              echo "> ℹ️ **Note**: Local access only (remote access disabled)"
             fi
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -752,21 +864,21 @@ jobs:
             IFS='|' read -r _ LABEL _ _ URL <<< "$t"
             printf "  %-10s %s\n" "$LABEL:" "$URL"
           done
-          echo "  Duration:  $DEBUG_MINUTES minutes"
+          echo "  Duration:  $PERSIST_MINUTES minutes"
           echo "========================================"
           echo ""
 
       - name: "Keep session alive"
         env:
-          DEBUG_MINUTES: ${{ needs.validate.outputs.debug_minutes }}
-          USE_BORE: ${{ inputs.enable_tunnel }}
+          PERSIST_MINUTES: ${{ needs.validate.outputs.persist_minutes }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
         run: |
           # Keep the session alive for the specified duration
-          echo "Session will remain active for $DEBUG_MINUTES minutes..."
+          echo "Session will remain active for $PERSIST_MINUTES minutes..."
           echo "Cancel the workflow manually when you're done."
           echo ""
 
-          TOTAL_SECONDS=$((DEBUG_MINUTES * 60))
+          TOTAL_SECONDS=$((PERSIST_MINUTES * 60))
           ELAPSED=0
           INTERVAL=60
 
@@ -774,7 +886,7 @@ jobs:
             REMAINING=$(( (TOTAL_SECONDS - ELAPSED) / 60 ))
             echo "[$(date '+%H:%M:%S')] $REMAINING minutes remaining..."
 
-            if [ "$USE_BORE" = "true" ]; then
+            if [ "$REMOTE_ACCESS" = "Bore" ]; then
               if ! pgrep -f "bore local" > /dev/null; then
                 echo "::warning::bore tunnels have stopped unexpectedly"
                 echo "HTTP tunnel log:"
@@ -794,14 +906,15 @@ jobs:
         if: always()
         env:
           CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
-          USE_BORE: ${{ inputs.enable_tunnel }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
         run: |
           # Cleanup tunnels and containers
           echo "Cleaning up..."
 
-          if [ "$USE_BORE" = "true" ]; then
+          if [ "$REMOTE_ACCESS" = "Bore" ]; then
             pkill -f "bore local" 2>/dev/null || true
           fi
+          # Note: Tailscale cleanup is handled by its action's post step
 
           if [ -n "$CONTAINER_IDS" ]; then
             echo "$CONTAINER_IDS" | jq -r '.[]' 2>/dev/null | \
@@ -820,7 +933,6 @@ jobs:
   resync-orgs-prepare:
     name: "Prepare resync matrix"
     runs-on: ubuntu-latest
-    needs: [validate, prepare]
     if: ${{ inputs.resync_orgs == true }}
     timeout-minutes: 5
     permissions:
@@ -838,7 +950,7 @@ jobs:
         id: build-matrix
         env:
           GERRIT_SERVERS: ${{ vars.GERRIT_SERVERS }}
-          GITHUB_SELECTOR: ${{ inputs.github_selector }}
+          RESYNC_PROJECT_SLUGS: ${{ inputs.resync_project_slugs }}
         run: |
           # Build matrix with all github orgs (github_org and github_gerrit_org)
           # Each entry maps a GitHub org to its source Gerrit server
@@ -877,16 +989,19 @@ jobs:
           FULL_COUNT=$(echo "$FULL_MATRIX" | jq '. | length')
           echo "Full matrix has $FULL_COUNT GitHub organizations"
 
-          # Apply github_selector filter
-          if [ -z "$GITHUB_SELECTOR" ] || [ "$GITHUB_SELECTOR" = "all" ]; then
+          # Apply resync_project_slugs filter
+          if [ -z "$RESYNC_PROJECT_SLUGS" ] || \
+             [ "$RESYNC_PROJECT_SLUGS" = "all" ]; then
             # Empty selector or "all" = all orgs
             MATRIX="$FULL_MATRIX"
             echo "Using all $FULL_COUNT GitHub organizations (no selector)"
           else
             # Parse comma/space-separated selectors and support wildcards
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$GITHUB_SELECTOR" | tr ',' '\n' | tr ' ' '\n' | \
-              sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+            SELECTORS=$(echo "$RESYNC_PROJECT_SLUGS" \
+              | tr ',' '\n' | tr ' ' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | grep -v '^$')
 
             echo "GitHub org selectors to match:"
             echo "$SELECTORS"
@@ -911,12 +1026,13 @@ jobs:
             ')
             MATCH_COUNT=$(echo "$MATRIX" | jq '. | length')
             if [ "$MATCH_COUNT" -eq 0 ]; then
-              echo "::error::No GitHub orgs matched selector: $GITHUB_SELECTOR"
+              echo "::error::No GitHub orgs matched" \
+                "selector: $RESYNC_PROJECT_SLUGS"
               echo "Available GitHub organizations:"
               echo "$FULL_MATRIX" | jq -r '.[].github_org'
               exit 1
             fi
-            echo "Matched $MATCH_COUNT orgs (selector: $GITHUB_SELECTOR)"
+            echo "Matched $MATCH_COUNT orgs (selector: $RESYNC_PROJECT_SLUGS)"
           fi
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -927,7 +1043,7 @@ jobs:
   resync-orgs:
     name: "Resync: ${{ matrix.org.github_org }}"
     runs-on: ubuntu-latest
-    needs: [validate, resync-orgs-prepare]
+    needs: [resync-orgs-prepare]
     if: ${{ inputs.resync_orgs == true }}
     permissions:
       contents: read
@@ -944,29 +1060,60 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: "Reset GitHub org: ${{ matrix.org.github_org }}"
+      - name: "Install uv"
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-clone-action@61649739a768432a7ceac4203a00f61b9be51345 # v1.0.1
-        with:
-          command: reset
-          github-org: ${{ matrix.org.github_org }}
-          github-token: ${{ secrets.ORG_ADMIN_TOKEN }}
-          force-reset: "true"
-          verbose: "true"
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b  # v7.3.0
+
+      - name: "Reset GitHub org: ${{ matrix.org.github_org }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          GITHUB_ORG: ${{ matrix.org.github_org }}
+        run: |
+          # Reset (delete all repositories from) the GitHub organization
+          echo "Resetting GitHub org: $GITHUB_ORG"
+          uvx gerrit-clone reset \
+            --org "$GITHUB_ORG" \
+            --no-confirm \
+            --verbose
 
       - name: "Mirror Gerrit to GitHub: ${{ matrix.org.github_org }}"
         id: mirror
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-clone-action@61649739a768432a7ceac4203a00f61b9be51345 # v1.0.1
-        with:
-          command: mirror
-          host: ${{ matrix.org.gerrit }}
-          github-org: ${{ matrix.org.github_org }}
-          github-token: ${{ secrets.ORG_ADMIN_TOKEN }}
-          output-path: "/tmp/mirror-${{ matrix.org.github_org }}"
-          recreate-repos: "true"
-          overwrite-local: "true"
-          verbose: "true"
+        env:
+          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          GITHUB_ORG: ${{ matrix.org.github_org }}
+          GERRIT_SERVER: ${{ matrix.org.gerrit }}
+          MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
+        run: |
+          # Mirror all repositories from Gerrit to GitHub
+          echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
+          uvx gerrit-clone mirror \
+            --server "$GERRIT_SERVER" \
+            --org "$GITHUB_ORG" \
+            --output-path "$MIRROR_OUTPUT_PATH" \
+            --recreate \
+            --overwrite \
+            --discovery-method http \
+            --https \
+            --verbose
+
+          # Extract counts from manifest for downstream reporting
+          MANIFEST="$MIRROR_OUTPUT_PATH/mirror-manifest.json"
+          if [ -f "$MANIFEST" ]; then
+            SUCCESS_COUNT=$(jq -r '.succeeded // 0' "$MANIFEST")
+            FAILURE_COUNT=$(jq -r '.failed // 0' "$MANIFEST")
+            TOTAL_COUNT=$(jq -r '.total // 0' "$MANIFEST")
+          else
+            echo "::warning::Mirror manifest not found at $MANIFEST"
+            SUCCESS_COUNT=0
+            FAILURE_COUNT=0
+            TOTAL_COUNT=0
+          fi
+
+          {
+            echo "success-count=$SUCCESS_COUNT"
+            echo "failure-count=$FAILURE_COUNT"
+            echo "total-count=$TOTAL_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: "Report results"
         if: always()
@@ -1003,8 +1150,9 @@ jobs:
     steps:
       - name: "Generate summary"
         env:
-          DEBUG_MINUTES: ${{ needs.validate.outputs.debug_minutes }}
+          PERSIST_MINUTES: ${{ needs.validate.outputs.persist_minutes }}
           DEBUG_COUNT: ${{ needs.prepare.outputs.debug_count }}
+          RESYNC_ORGS: ${{ inputs.resync_orgs }}
         run: |
           # Generate test summary
           {
@@ -1015,9 +1163,13 @@ jobs:
             echo "| Validation | ${{ needs.validate.result }} |"
             echo "| Preparation | ${{ needs.prepare.result }} |"
             echo "| Sync Tests | ${{ needs.sync-test.result }} |"
-            if [ "$DEBUG_MINUTES" != "0" ]; then
-              echo "| Debug Sessions ($DEBUG_COUNT) \
+            if [ "$PERSIST_MINUTES" != "0" ]; then
+              echo "| Persist Sessions ($DEBUG_COUNT) \
                 | ${{ needs.persist-gerrit.result }} |"
+            fi
+            if [ "$RESYNC_ORGS" = "true" ]; then
+              echo "| Resync Orgs \
+                | ${{ needs.resync-orgs.result }} |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
