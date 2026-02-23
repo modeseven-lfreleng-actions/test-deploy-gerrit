@@ -1066,20 +1066,21 @@ jobs:
 
       - name: "Reset GitHub org: ${{ matrix.org.github_org }}"
         env:
-          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
         run: |
           # Reset (delete all repositories from) the GitHub organization
           echo "Resetting GitHub org: $GITHUB_ORG"
           uvx gerrit-clone reset \
             --org "$GITHUB_ORG" \
+            --github-token "$ORG_ADMIN_TOKEN" \
             --no-confirm \
             --verbose
 
       - name: "Mirror Gerrit to GitHub: ${{ matrix.org.github_org }}"
         id: mirror
         env:
-          GITHUB_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
           GERRIT_SERVER: ${{ matrix.org.gerrit }}
           MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
@@ -1089,6 +1090,7 @@ jobs:
           uvx gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
+            --github-token "$ORG_ADMIN_TOKEN" \
             --output-path "$MIRROR_OUTPUT_PATH" \
             --recreate \
             --overwrite \
