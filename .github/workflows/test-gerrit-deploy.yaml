@@ -1156,12 +1156,15 @@ jobs:
 
           # Mirror all repos from Gerrit to GitHub
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
+          # --recreate is intentionally omitted: the reset step above
+          # already deleted all repos, so every repo is new.  Adding
+          # --recreate would trigger redundant delete API calls that
+          # burn secondary-rate-limit budget for no benefit.
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
             --output-path "$MIRROR_OUTPUT_PATH" \
-            --recreate \
             --overwrite \
             --discovery-method http \
             --https \
