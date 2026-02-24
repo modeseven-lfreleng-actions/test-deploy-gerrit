@@ -66,6 +66,12 @@ on:
         required: false
         default: "all"
         type: string
+      gerrit_clone_ref:
+        # e.g. modeseven-lfreleng-actions/gerrit-clone-action@fix-github-bugs
+        description: "Build gerrit-clone from git ref (empty = PyPI)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -1080,6 +1086,24 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b  # v7.3.0
 
+      - name: "Install gerrit-clone CLI"
+        env:
+          CLONE_REF: ${{ inputs.gerrit_clone_ref }}
+        run: |
+          if [ -n "$CLONE_REF" ]; then
+            REPO="${CLONE_REF%%@*}"
+            BRANCH="${CLONE_REF#*@}"
+            echo "Installing from source: $REPO @ $BRANCH"
+            SRC="gerrit-clone @ "
+            SRC+="git+https://github.com/"
+            SRC+="${REPO}.git@${BRANCH}"
+            uv tool install "$SRC"
+          else
+            echo "Installing gerrit-clone from PyPI"
+            uv tool install gerrit-clone
+          fi
+          gerrit-clone --version
+
       - name: "Reset GitHub org: ${{ matrix.org.github_org }}"
         env:
           ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
@@ -1096,7 +1120,7 @@ jobs:
 
           # Reset (delete all repos from) the GitHub org
           echo "Resetting GitHub org: $GITHUB_ORG"
-          uvx gerrit-clone reset \
+          gerrit-clone reset \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
             --no-confirm \
@@ -1119,7 +1143,7 @@ jobs:
 
           # Mirror all repos from Gerrit to GitHub
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
-          uvx gerrit-clone mirror \
+          gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
