@@ -33,7 +33,7 @@ on:
         default: "onap"
         type: string
       persist_minutes:
-        description: "Persistent session duration (minutes, max 60)"
+        description: "Persistent session duration (minutes, max 25)"
         required: false
         default: 15
         type: number
@@ -63,7 +63,7 @@ on:
         type: boolean
       resync_project_slugs:
         # Supports: 'all', single value, comma/space-separated, wildcards (*,?)
-        description: "Resync these GitHub orgs (slug)"
+        description: "Resync these GitHub orgs"
         required: false
         default: "all"
         type: string
@@ -72,7 +72,10 @@ on:
         # When unset, defaults to installing/running from PyPI with 'uvx'
         description: "Build gerrit-clone from git ref"
         required: false
-        default: ""
+        # Temporarily testing against a fork/branch
+        # This should be removed once the fork is merged into upstream
+        # yamllint disable-line rule:line-length
+        default: "modeseven-lfreleng-actions/gerrit-clone-action@fix-github-bugs"
         type: string
 
 concurrency:
@@ -108,10 +111,10 @@ jobs:
             echo "::error::persist_minutes must be an integer: $PERSIST_MINUTES"
             exit 1
           fi
-          if [ "$PERSIST_MINUTES" -gt 60 ]; then
+          if [ "$PERSIST_MINUTES" -gt 25 ]; then
             echo "::warning::persist_minutes capped" \
-              "at 60 (was: $PERSIST_MINUTES)"
-            PERSIST_MINUTES=60
+              "at 25 (was: $PERSIST_MINUTES)"
+            PERSIST_MINUTES=25
           fi
           if [ "$PERSIST_MINUTES" -lt 5 ]; then
             echo "::warning::persist_minutes min" \
@@ -359,7 +362,7 @@ jobs:
       && needs.prepare.outputs.debug_count != '0'
     permissions:
       contents: read
-    timeout-minutes: 65
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -1082,7 +1085,7 @@ jobs:
     if: ${{ inputs.resync_orgs == true }}
     permissions:
       contents: read
-    timeout-minutes: 120
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1160,12 +1163,16 @@ jobs:
           # already deleted all repos, so every repo is new.  Adding
           # --recreate would trigger redundant delete API calls that
           # burn secondary-rate-limit budget for no benefit.
+          # --no-mirror avoids pushing Gerrit-specific refs
+          # (refs/changes/*, refs/meta/*, etc.) that have no
+          # meaning on GitHub and massively slow down pushes.
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
             --output-path "$MIRROR_OUTPUT_PATH" \
             --overwrite \
+            --no-mirror \
             --discovery-method http \
             --https \
             --verbose
