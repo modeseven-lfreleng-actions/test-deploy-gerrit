@@ -25,10 +25,10 @@ on:
         options:
           - "true"
           - "false"
-      persist_project_slugs:
+      persist_project_gerrits:
         # Supports: 'none', 'all', single value, comma/space-separated,
         # wildcards (*,?). Use 'none' to disable persistent sessions.
-        description: "Persistent session selector (project slug)"
+        description: "Persistent session selector (project Gerrit)"
         required: false
         default: "onap"
         type: string
@@ -56,16 +56,13 @@ on:
           - "None"
           - "Bore"
           - "Tailscale"
-      resync_orgs:
-        description: "Resync GitHub ORGs with Gerrit"
+      resync_github_orgs:
+        # Supports: 'none', 'all', single value, comma/space-separated
+        # Values are matched as substrings
+        # (e.g. 'onap' matches 'modeseven-onap')
+        description: "Resync GitHub orgs ('none', 'all', or substring filter)"
         required: false
-        default: false
-        type: boolean
-      resync_project_slugs:
-        # Supports: 'all', single value, comma/space-separated, wildcards (*,?)
-        description: "Resync these GitHub orgs"
-        required: false
-        default: "all"
+        default: "none"
         type: string
       gerrit_clone_ref:
         # e.g. modeseven-lfreleng-actions/gerrit-clone-action@fix-github-bugs
@@ -168,7 +165,7 @@ jobs:
           # GERRIT_SERVERS is a repository variable (not secret) containing:
           # [{"project":"ONAP","slug":"onap","gerrit":"gerrit.onap.org",...}]
           GERRIT_SERVERS: ${{ vars.GERRIT_SERVERS }}
-          PERSIST_PROJECT_SLUGS: ${{ inputs.persist_project_slugs }}
+          PERSIST_PROJECT_GERRITS: ${{ inputs.persist_project_gerrits }}
         run: |
           # Set matrix from GERRIT_SERVERS repository variable
           if [ -z "$GERRIT_SERVERS" ]; then
@@ -190,7 +187,7 @@ jobs:
 
           # Output filtered matrix for debug/persist tests
           # "none" (case-insensitive) disables persistent sessions entirely
-          SLUGS_LOWER=$(echo "$PERSIST_PROJECT_SLUGS" \
+          SLUGS_LOWER=$(echo "$PERSIST_PROJECT_GERRITS" \
             | tr '[:upper:]' '[:lower:]' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
@@ -198,15 +195,15 @@ jobs:
             # Explicitly disabled — output empty matrix, no error
             DEBUG_MATRIX="[]"
             echo "Persistent sessions disabled (selector: none)"
-          elif [ -z "$PERSIST_PROJECT_SLUGS" ] || \
-               [ "$PERSIST_PROJECT_SLUGS" = "all" ]; then
+          elif [ -z "$PERSIST_PROJECT_GERRITS" ] || \
+               [ "$PERSIST_PROJECT_GERRITS" = "all" ]; then
             # Empty selector or "all" = all servers
             DEBUG_MATRIX="$MATRIX"
             echo "Debug matrix: all $COUNT servers (no selector)"
           else
             # Parse comma/space-separated selectors and support wildcards
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$PERSIST_PROJECT_SLUGS" \
+            SELECTORS=$(echo "$PERSIST_PROJECT_GERRITS" \
               | tr ',' '\n' | tr ' ' '\n' \
               | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
               | grep -v '^$')
@@ -236,12 +233,13 @@ jobs:
             DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
             if [ "$DEBUG_COUNT" -eq 0 ]; then
               echo "::error::No servers matched" \
-                "selector: $PERSIST_PROJECT_SLUGS"
+                "selector: $PERSIST_PROJECT_GERRITS"
               echo "Available slugs:"
               echo "$GERRIT_SERVERS" | jq -r '.[].slug'
               exit 1
             fi
-            echo "Debug matrix: $DEBUG_COUNT server(s) [$PERSIST_PROJECT_SLUGS]"
+            echo "Debug matrix: $DEBUG_COUNT server(s)" \
+              "[$PERSIST_PROJECT_GERRITS]"
           fi
           echo "debug_matrix=$DEBUG_MATRIX" >> "$GITHUB_OUTPUT"
           DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
@@ -971,7 +969,8 @@ jobs:
   resync-orgs-prepare:
     name: "Prepare resync matrix"
     runs-on: ubuntu-latest
-    if: ${{ inputs.resync_orgs == true }}
+    # yamllint disable-line rule:line-length
+    if: ${{ inputs.resync_github_orgs != 'none' && inputs.resync_github_orgs != '' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -988,7 +987,7 @@ jobs:
         id: build-matrix
         env:
           GERRIT_SERVERS: ${{ vars.GERRIT_SERVERS }}
-          RESYNC_PROJECT_SLUGS: ${{ inputs.resync_project_slugs }}
+          RESYNC_GITHUB_ORGS: ${{ inputs.resync_github_orgs }}
         run: |
           # Build matrix with all github orgs (github_org and github_gerrit_org)
           # Each entry maps a GitHub org to its source Gerrit server
@@ -1027,37 +1026,31 @@ jobs:
           FULL_COUNT=$(echo "$FULL_MATRIX" | jq '. | length')
           echo "Full matrix has $FULL_COUNT GitHub organizations"
 
-          # Apply resync_project_slugs filter
-          if [ -z "$RESYNC_PROJECT_SLUGS" ] || \
-             [ "$RESYNC_PROJECT_SLUGS" = "all" ]; then
+          # Apply resync_github_orgs filter
+          if [ -z "$RESYNC_GITHUB_ORGS" ] || \
+             [ "$RESYNC_GITHUB_ORGS" = "all" ]; then
             # Empty selector or "all" = all orgs
             MATRIX="$FULL_MATRIX"
-            echo "Using all $FULL_COUNT GitHub organizations (no selector)"
+            echo "Using all $FULL_COUNT GitHub organizations (no filter)"
           else
-            # Parse comma/space-separated selectors and support wildcards
+            # Parse comma/space-separated selectors for substring matching
             # Convert to newline-separated, trim whitespace
-            SELECTORS=$(echo "$RESYNC_PROJECT_SLUGS" \
+            SELECTORS=$(echo "$RESYNC_GITHUB_ORGS" \
               | tr ',' '\n' | tr ' ' '\n' \
               | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
               | grep -v '^$')
 
-            echo "GitHub org selectors to match:"
+            echo "GitHub org substring selectors to match:"
             echo "$SELECTORS"
 
-            # Build jq filter for each selector (wildcards supported)
-            # Convert shell wildcards to regex: * -> .*, ? -> .
+            # Build jq filter using substring matching
+            # Each selector is matched as a substring of github_org
             MATRIX=$(echo "$FULL_MATRIX" | jq -c --arg selectors "$SELECTORS" '
               ($selectors | split("\n")) as $sels |
               [.[] | . as $org |
                 select(
                   any($sels[]; . as $sel |
-                    if ($sel | contains("*")) or ($sel | contains("?")) then
-                      # Convert glob to regex: * -> .*, ? -> .
-                      ($sel | gsub("\\*"; ".*") | gsub("\\?"; ".")) as $regex |
-                      ($org.github_org | test("^" + $regex + "$"))
-                    else
-                      $org.github_org == $sel
-                    end
+                    ($org.github_org | contains($sel))
                   )
                 )
               ]
@@ -1065,12 +1058,12 @@ jobs:
             MATCH_COUNT=$(echo "$MATRIX" | jq '. | length')
             if [ "$MATCH_COUNT" -eq 0 ]; then
               echo "::error::No GitHub orgs matched" \
-                "selector: $RESYNC_PROJECT_SLUGS"
+                "filter: $RESYNC_GITHUB_ORGS"
               echo "Available GitHub organizations:"
               echo "$FULL_MATRIX" | jq -r '.[].github_org'
               exit 1
             fi
-            echo "Matched $MATCH_COUNT orgs (selector: $RESYNC_PROJECT_SLUGS)"
+            echo "Matched $MATCH_COUNT orgs (filter: $RESYNC_GITHUB_ORGS)"
           fi
 
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
@@ -1082,7 +1075,8 @@ jobs:
     name: "Resync: ${{ matrix.org.github_org }}"
     runs-on: ubuntu-latest
     needs: [resync-orgs-prepare]
-    if: ${{ inputs.resync_orgs == true }}
+    # yamllint disable-line rule:line-length
+    if: ${{ inputs.resync_github_orgs != 'none' && inputs.resync_github_orgs != '' }}
     permissions:
       contents: read
     timeout-minutes: 30
@@ -1233,7 +1227,7 @@ jobs:
         env:
           PERSIST_MINUTES: ${{ needs.validate.outputs.persist_minutes }}
           DEBUG_COUNT: ${{ needs.prepare.outputs.debug_count }}
-          RESYNC_ORGS: ${{ inputs.resync_orgs }}
+          RESYNC_GITHUB_ORGS: ${{ inputs.resync_github_orgs }}
         run: |
           # Generate test summary
           {
@@ -1251,7 +1245,8 @@ jobs:
             elif [ "$DEBUG_COUNT" = "0" ]; then
               echo "| Persist Sessions | skipped (selector: none) |"
             fi
-            if [ "$RESYNC_ORGS" = "true" ]; then
+            if [ "$RESYNC_GITHUB_ORGS" != "none" ] && \
+               [ -n "$RESYNC_GITHUB_ORGS" ]; then
               echo "| Resync Orgs \
                 | ${{ needs.resync-orgs.result }} |"
             fi

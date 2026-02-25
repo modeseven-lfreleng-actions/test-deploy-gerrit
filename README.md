@@ -28,50 +28,81 @@ You can trigger the workflow manually with optional parameters:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                   | Description                                                                         | Default |
-| ----------------------- | ----------------------------------------------------------------------------------- | ------- |
-| `debug`                 | Enable verbose debug output                                                         | `false` |
-| `sync_on_startup`       | Trigger pull-replication after container startup                                    | `true`  |
-| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax)) | `onap`  |
-| `persist_minutes`       | Persistent session duration (minutes, max 60)                                       | `15`    |
-| `match_api_path`        | Match origin server URL API path                                                    | `true`  |
-| `remote_access`         | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))       | `None`  |
-| `resync_orgs`           | Resync GitHub ORGs with Gerrit content                                              | `false` |
-| `resync_project_slugs`  | Resync these GitHub orgs (slug, see [Selector Syntax](#selector-syntax))            | `all`   |
+| Input                     | Description                                                                           | Default |
+| ------------------------- | ------------------------------------------------------------------------------------- | ------- |
+| `debug`                   | Enable verbose debug output                                                           | `false` |
+| `sync_on_startup`         | Trigger pull-replication after container startup                                      | `true`  |
+| `persist_project_gerrits` | Persistent session selector (project Gerrit, see [Selector Syntax](#selector-syntax)) | `onap`  |
+| `persist_minutes`         | Persistent session duration (minutes, max 25)                                         | `15`    |
+| `match_api_path`          | Match origin server URL API path                                                      | `true`  |
+| `remote_access`           | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))         | `None`  |
+| `resync_github_orgs`      | Resync GitHub orgs (`none`, `all`, or substring filter)                               | `none`  |
+| `gerrit_clone_ref`        | Build gerrit-clone from git ref (unset defaults to PyPI via `uvx`)                    | *fork*  |
 
 <!-- markdownlint-enable MD013 -->
 
 ### Selector Syntax
 
-Both `persist_project_slugs` and `resync_project_slugs` inputs support
-flexible matching:
+#### `persist_project_gerrits`
 
-| Pattern        | Description               | Example                       |
-| -------------- | ------------------------- | ----------------------------- |
-| `all`          | Match all items (default) | `all`                         |
-| Single value   | Exact match               | `onap`                        |
-| List of values | Comma or space-separated  | `onap, oran` or `onap oran`   |
-| Wildcards      | Shell-style patterns      | `*gerrit*`, `modeseven-?ran*` |
+Selects which Gerrit servers get persistent debug sessions. Matches against
+the `slug` field in `GERRIT_SERVERS`.
+
+| Pattern        | Description              | Example                       |
+| -------------- | ------------------------ | ----------------------------- |
+| `none`         | Disable persist sessions | `none`                        |
+| `all`          | Match all servers        | `all`                         |
+| Single value   | Exact match              | `onap`                        |
+| List of values | Comma or space-separated | `onap, oran` or `onap oran`   |
+| Wildcards      | Shell-style patterns     | `*gerrit*`, `modeseven-?ran*` |
 
 **Examples:**
 
 ```bash
-# Match ONAP servers/orgs
-persist_project_slugs: "onap"
+# Match ONAP server
+persist_project_gerrits: "onap"
 
 # Match specific servers
-persist_project_slugs: "onap, oran, lf"
+persist_project_gerrits: "onap, oran, lf"
 
-# Match all gerrit-prefixed GitHub orgs
-resync_project_slugs: "*gerrit*"
+# Match all servers with wildcard
+persist_project_gerrits: "all"
+```
 
-# Match ONAP and O-RAN-SC orgs (both regular and gerrit variants)
-resync_project_slugs: "modeseven-onap, modeseven-gerrit-onap, modeseven-o-ran-sc"
+#### `resync_github_orgs`
+
+Selects which GitHub organizations to resync with Gerrit content. The workflow
+matches values as **substrings** against the `github_org` and
+`github_gerrit_org` fields in `GERRIT_SERVERS`.
+
+<!-- markdownlint-disable MD013 -->
+
+| Pattern        | Description                | Example                                      |
+| -------------- | -------------------------- | -------------------------------------------- |
+| `none`         | No resync (default)        | `none`                                       |
+| `all`          | Resync all organizations   | `all`                                        |
+| Single value   | Substring match            | `onap` (matches `modeseven-onap` etc.)       |
+| List of values | Comma or space-separated   | `onap, o-ran-sc` or `onap o-ran-sc`          |
+
+<!-- markdownlint-enable MD013 -->
+
+**Examples:**
+
+```bash
+# Resync all ONAP-related organizations (matches modeseven-onap,
+# modeseven-gerrit-onap, etc.)
+resync_github_orgs: "onap"
+
+# Resync ONAP and O-RAN-SC organizations
+resync_github_orgs: "onap, o-ran-sc"
+
+# Resync all organizations
+resync_github_orgs: "all"
 ```
 
 ### Resync GitHub Organizations
 
-When you enable `resync_orgs`, the workflow will:
+When you set `resync_github_orgs` to anything other than `none`, the workflow will:
 
 1. **Reset**: Delete all repositories from the target GitHub organization(s)
 2. **Mirror**: Clone all content from the corresponding Gerrit server and push
@@ -85,16 +116,14 @@ sync/test jobs — they share no dependencies and do not block each other.
 **⚠️ WARNING**: This is a destructive operation! The workflow deletes
 all existing repositories in the target GitHub organizations before mirroring.
 
-Use `resync_project_slugs` to select specific organizations:
+Use `resync_github_orgs` to select specific organizations:
 
 ```bash
-# Resync ONAP organizations
-resync_orgs: true
-resync_project_slugs: "*onap*"
+# Resync ONAP organizations (substring match)
+resync_github_orgs: "onap"
 
 # Resync gerrit-specific organizations
-resync_orgs: true
-resync_project_slugs: "*gerrit*"
+resync_github_orgs: "gerrit"
 ```
 
 ## Configuration
