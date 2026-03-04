@@ -56,14 +56,19 @@ on:
           - "None"
           - "Bore"
           - "Tailscale"
-      resync_orgs:
-        description: "Resync GitHub ORGs with Gerrit"
+      reset_orgs:
+        description: "Reset (delete all repos from) GitHub ORGs"
         required: false
         default: false
         type: boolean
-      resync_project_slugs:
+      sync_orgs:
+        description: "Sync GitHub ORGs from Gerrit"
+        required: false
+        default: false
+        type: boolean
+      sync_project_slugs:
         # Supports: 'all', single value, comma/space-separated, wildcards (*,?)
-        description: "Resync these GitHub orgs"
+        description: "GitHub orgs to reset/sync (selector)"
         required: false
         default: "all"
         type: string
@@ -969,7 +974,7 @@ jobs:
   resync-orgs-prepare:
     name: "Prepare resync matrix"
     runs-on: ubuntu-latest
-    if: ${{ inputs.resync_orgs == true }}
+    if: ${{ inputs.reset_orgs == true || inputs.sync_orgs == true }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -986,7 +991,7 @@ jobs:
         id: build-matrix
         env:
           GERRIT_SERVERS: ${{ vars.GERRIT_SERVERS }}
-          RESYNC_PROJECT_SLUGS: ${{ inputs.resync_project_slugs }}
+          RESYNC_PROJECT_SLUGS: ${{ inputs.sync_project_slugs }}
         run: |
           # Build matrix with all github orgs (github_org and github_gerrit_org)
           # Each entry maps a GitHub org to its source Gerrit server
@@ -1076,14 +1081,14 @@ jobs:
           echo "Resync matrix prepared with $COUNT GitHub organizations"
           echo "$MATRIX" | jq '.'
 
-  resync-orgs:
-    name: "Resync: ${{ matrix.org.github_org }}"
+  reset-orgs:
+    name: "Reset: ${{ matrix.org.github_org }}"
     runs-on: ubuntu-latest
     needs: [resync-orgs-prepare]
-    if: ${{ inputs.resync_orgs == true }}
+    if: ${{ inputs.reset_orgs == true }}
     permissions:
       contents: read
-    timeout-minutes: 360
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -1140,6 +1145,68 @@ jobs:
             --no-confirm \
             --verbose
 
+      - name: "Report reset results"
+        if: always()
+        env:
+          GITHUB_ORG: ${{ matrix.org.github_org }}
+        run: |
+          {
+            echo "## Reset: $GITHUB_ORG"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| GitHub Org | \`$GITHUB_ORG\` |"
+            echo "| Status | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-orgs:
+    name: "Sync: ${{ matrix.org.github_org }}"
+    runs-on: ubuntu-latest
+    needs: [resync-orgs-prepare, reset-orgs]
+    # Run when sync is requested, even if reset-orgs was skipped
+    if: >-
+      ${{ always()
+          && inputs.sync_orgs == true
+          && needs.resync-orgs-prepare.result == 'success'
+          && (needs.reset-orgs.result == 'success'
+              || needs.reset-orgs.result == 'skipped') }}
+    permissions:
+      contents: read
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        org: ${{ fromJSON(needs.resync-orgs-prepare.outputs.matrix) }}
+    steps:
+      # Harden the runner
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
+        with:
+          egress-policy: audit
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098  # v7.3.1
+
+      - name: "Install gerrit-clone CLI"
+        env:
+          CLONE_REF: ${{ inputs.gerrit_clone_ref }}
+        run: |
+          if [ -n "$CLONE_REF" ]; then
+            REPO="${CLONE_REF%%@*}"
+            BRANCH="${CLONE_REF#*@}"
+            echo "Installing from source: $REPO @ $BRANCH"
+            SRC="gerrit-clone @ "
+            SRC+="git+https://github.com/"
+            SRC+="${REPO}.git@${BRANCH}"
+            uv tool install "$SRC"
+          else
+            echo "Installing gerrit-clone from PyPI"
+            uv tool install gerrit-clone
+          fi
+          gerrit-clone --version
+
       - name: "Mirror Gerrit to GitHub: ${{ matrix.org.github_org }}"
         id: mirror
         env:
@@ -1156,14 +1223,10 @@ jobs:
           fi
 
           # Mirror all repos from Gerrit to GitHub
+          # This is idempotent: missing repos are created, existing
+          # repos are pushed to (git push --mirror is a safe no-op
+          # when the repo is already up to date).
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
-          # --recreate is intentionally omitted: the reset step above
-          # already deleted all repos, so every repo is new.  Adding
-          # --recreate would trigger redundant delete API calls that
-          # burn secondary-rate-limit budget for no benefit.
-          # --no-mirror avoids pushing Gerrit-specific refs
-          # (refs/changes/*, refs/meta/*, etc.) that have no
-          # meaning on GitHub and massively slow down pushes.
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
@@ -1194,7 +1257,7 @@ jobs:
             echo "total-count=$TOTAL_COUNT"
           } >> "$GITHUB_OUTPUT"
 
-      - name: "Report results"
+      - name: "Report sync results"
         if: always()
         env:
           GITHUB_ORG: ${{ matrix.org.github_org }}
@@ -1204,7 +1267,7 @@ jobs:
           TOTAL_COUNT: ${{ steps.mirror.outputs.total-count }}
         run: |
           {
-            echo "## Resync: $GITHUB_ORG"
+            echo "## Sync: $GITHUB_ORG"
             echo ""
             echo "| Property | Value |"
             echo "|----------|-------|"
@@ -1222,7 +1285,13 @@ jobs:
     name: "Test Summary"
     runs-on: ubuntu-latest
     timeout-minutes: 3
-    needs: [validate, prepare, sync-test, persist-gerrit, resync-orgs]
+    needs:
+      - validate
+      - prepare
+      - sync-test
+      - persist-gerrit
+      - reset-orgs
+      - sync-orgs
     if: always()
     permissions:
       contents: read
@@ -1231,7 +1300,8 @@ jobs:
         env:
           PERSIST_MINUTES: ${{ needs.validate.outputs.persist_minutes }}
           DEBUG_COUNT: ${{ needs.prepare.outputs.debug_count }}
-          RESYNC_ORGS: ${{ inputs.resync_orgs }}
+          RESET_ORGS: ${{ inputs.reset_orgs }}
+          SYNC_ORGS: ${{ inputs.sync_orgs }}
         run: |
           # Generate test summary
           {
@@ -1249,9 +1319,13 @@ jobs:
             elif [ "$DEBUG_COUNT" = "0" ]; then
               echo "| Persist Sessions | skipped (selector: none) |"
             fi
-            if [ "$RESYNC_ORGS" = "true" ]; then
-              echo "| Resync Orgs \
-                | ${{ needs.resync-orgs.result }} |"
+            if [ "$RESET_ORGS" = "true" ]; then
+              echo "| Reset Orgs \
+                | ${{ needs.reset-orgs.result }} |"
+            fi
+            if [ "$SYNC_ORGS" = "true" ]; then
+              echo "| Sync Orgs \
+                | ${{ needs.sync-orgs.result }} |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
