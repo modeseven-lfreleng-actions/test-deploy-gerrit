@@ -72,10 +72,7 @@ on:
         # When unset, defaults to installing/running from PyPI with 'uvx'
         description: "Build gerrit-clone from git ref"
         required: false
-        # Temporarily testing against a fork/branch
-        # This should be removed once the fork is merged into upstream
-        # yamllint disable-line rule:line-length
-        default: "modeseven-lfreleng-actions/gerrit-clone-action@fix-github-bugs"
+        default: ""
         type: string
 
 concurrency:
@@ -319,7 +316,7 @@ jobs:
       - name: "Test Gerrit server: ${{ matrix.server.gerrit }}"
         id: gerrit
         # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/gerrit-action@refactor-replication  # Testing
+        uses: lfreleng-actions/gerrit-action@da55cffa05c4b601a26a684688dec010c41561d1  # v0.1.0
         with:
           gerrit_setup: |
             [{
@@ -644,7 +641,7 @@ jobs:
       - name: "Start Gerrit mirror: ${{ matrix.server.name }}"
         id: gerrit
         # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/gerrit-action@refactor-replication  # Testing
+        uses: lfreleng-actions/gerrit-action@da55cffa05c4b601a26a684688dec010c41561d1  # v0.1.0
         with:
           gerrit_setup: |
             [{
