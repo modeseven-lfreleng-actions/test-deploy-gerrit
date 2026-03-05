@@ -1030,8 +1030,7 @@ jobs:
           gerrit-clone reset \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
-            --no-confirm \
-            --verbose
+            --no-confirm
 
       - name: "Report reset results"
         if: always()
@@ -1129,8 +1128,7 @@ jobs:
             --overwrite \
             --no-mirror \
             --discovery-method http \
-            --https \
-            --verbose || MIRROR_RC=$?
+            --https || MIRROR_RC=$?
 
           # Extract counts from manifest for downstream reporting
           MANIFEST="$MIRROR_OUTPUT_PATH/mirror-manifest.json"
