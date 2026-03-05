@@ -33,7 +33,7 @@ on:
         default: "onap"
         type: string
       persist_minutes:
-        description: "Persistent session duration (minutes, max 25)"
+        description: "Persistent session duration (minutes, 0 to skip, max 25)"
         required: false
         default: 15
         type: number
@@ -119,11 +119,6 @@ jobs:
               "at 25 (was: $PERSIST_MINUTES)"
             PERSIST_MINUTES=25
           fi
-          if [ "$PERSIST_MINUTES" -lt 5 ]; then
-            echo "::warning::persist_minutes min" \
-              "is 5 (was: $PERSIST_MINUTES)"
-            PERSIST_MINUTES=5
-          fi
           echo "persist_minutes=$PERSIST_MINUTES" >> "$GITHUB_OUTPUT"
           echo "Validated persist_minutes: $PERSIST_MINUTES"
 
@@ -155,7 +150,6 @@ jobs:
     permissions:
       contents: read
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
       debug_matrix: ${{ steps.set-matrix.outputs.debug_matrix }}
       debug_count: ${{ steps.set-matrix.outputs.debug_count }}
     steps:
@@ -185,13 +179,10 @@ jobs:
             exit 1
           fi
 
-          # Output full matrix for sync tests
-          MATRIX=$(echo "$GERRIT_SERVERS" | jq -c '.')
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           COUNT=$(echo "$GERRIT_SERVERS" | jq '. | length')
-          echo "Full matrix prepared with $COUNT Gerrit servers"
+          echo "Full server list: $COUNT Gerrit servers"
 
-          # Output filtered matrix for debug/persist tests
+          # Output filtered matrix for persist/debug tests
           # "none" (case-insensitive) disables persistent sessions entirely
           SLUGS_LOWER=$(echo "$PERSIST_PROJECT_SLUGS" \
             | tr '[:upper:]' '[:lower:]' \
@@ -250,114 +241,9 @@ jobs:
           DEBUG_COUNT=$(echo "$DEBUG_MATRIX" | jq '. | length')
           echo "debug_count=$DEBUG_COUNT" >> "$GITHUB_OUTPUT"
 
-  ### Test Gerrit server startup and sync ###
-  sync-test:
-    name: "${{ matrix.server.name }}"
-    runs-on: ubuntu-latest
-    needs: [validate, prepare]
-    permissions:
-      contents: read
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        server: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    steps:
-      # Harden the runner used by this workflow
-      # yamllint disable-line rule:line-length
-      - uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b  # v2.15.0
-        with:
-          egress-policy: audit
-
-      - name: "Checkout repository"
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: "Lookup credentials for ${{ matrix.server.slug }}"
-        id: credentials
-        env:
-          GERRIT_CREDENTIALS_B64: ${{ secrets.GERRIT_CREDENTIALS }}
-          SERVER_SLUG: ${{ matrix.server.slug }}
-        run: |
-          # Lookup credentials for this server from the base64-encoded secret
-          if [ -z "$GERRIT_CREDENTIALS_B64" ]; then
-            echo "::error::GERRIT_CREDENTIALS secret is not set"
-            exit 1
-          fi
-
-          # Decode base64-encoded credentials JSON
-          # The secret is stored as base64 to avoid GitHub's spurious redactions
-          GERRIT_CREDENTIALS=$(echo "$GERRIT_CREDENTIALS_B64" \
-            | base64 -d 2>/dev/null)
-          if [ -z "$GERRIT_CREDENTIALS" ]; then
-            echo "::error::Failed to decode GERRIT_CREDENTIALS (invalid base64)"
-            exit 1
-          fi
-
-          # Validate JSON format
-          if ! echo "$GERRIT_CREDENTIALS" | jq empty 2>/dev/null; then
-            echo "::error::Decoded GERRIT_CREDENTIALS is not valid JSON"
-            exit 1
-          fi
-
-          CREDS=$(echo "$GERRIT_CREDENTIALS" | \
-            jq -r --arg slug "$SERVER_SLUG" '.[] | select(.slug == $slug)')
-
-          if [ -z "$CREDS" ]; then
-            echo "::error::No credentials found for slug: $SERVER_SLUG"
-            exit 1
-          fi
-
-          # Extract and mask sensitive values
-          USERNAME=$(echo "$CREDS" | jq -r '.username')
-          PASSWORD=$(echo "$CREDS" | jq -r '.password')
-
-          # Mask the password in logs
-          echo "::add-mask::$PASSWORD"
-
-          # Set outputs for use in subsequent steps
-          echo "username=$USERNAME" >> "$GITHUB_OUTPUT"
-          echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
-
-      - name: "Test Gerrit server: ${{ matrix.server.gerrit }}"
-        id: gerrit
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-action@da55cffa05c4b601a26a684688dec010c41561d1  # v0.1.0
-        with:
-          gerrit_setup: |
-            [{
-              "project": "${{ matrix.server.project_filter || '' }}",
-              "slug": "${{ matrix.server.slug }}",
-              "gerrit": "${{ matrix.server.gerrit }}",
-              "api_path": "${{ matrix.server.api_path }}"
-            }]
-          auth_type: http_basic
-          http_username: ${{ steps.credentials.outputs.username }}
-          http_password: ${{ steps.credentials.outputs.password }}
-          sync_on_startup: ${{ inputs.sync_on_startup || 'false' }}
-          debug: ${{ needs.validate.outputs.effective_debug }}
-          check_service: true
-          exit: true
-
-      - name: "Report success: ${{ matrix.server.name }}"
-        env:
-          API_PATHS: ${{ steps.gerrit.outputs.api_paths }}
-        run: |
-          # Report success
-          {
-            echo "## ✅ ${{ matrix.server.name }}"
-            echo ""
-            echo "Successfully connected to \`${{ matrix.server.gerrit }}\`"
-            echo ""
-            echo "### API Path Information"
-            echo '```json'
-            echo "$API_PATHS" | jq '.'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  ### Debug Gerrit Deployment with Optional Tunnel Access ###
-  persist-gerrit:
-    name: "Persist: ${{ matrix.server.name }}"
+  ### Gerrit Deployment with Optional Tunnel Access ###
+  deploy-gerrit:
+    name: "Deploy: ${{ matrix.server.name }}"
     runs-on: ubuntu-latest
     needs: [validate, prepare]
     if: >-
@@ -647,7 +533,7 @@ jobs:
       - name: "Start Gerrit mirror: ${{ matrix.server.name }}"
         id: gerrit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-action@da55cffa05c4b601a26a684688dec010c41561d1  # v0.1.0
+        uses: modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668
         with:
           gerrit_setup: |
             [{
@@ -1104,6 +990,8 @@ jobs:
       - name: "Install uv"
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098  # v7.3.1
+        with:
+          enable-cache: false
 
       - name: "Install gerrit-clone CLI"
         env:
@@ -1188,6 +1076,8 @@ jobs:
       - name: "Install uv"
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098  # v7.3.1
+        with:
+          enable-cache: false
 
       - name: "Install gerrit-clone CLI"
         env:
@@ -1227,6 +1117,10 @@ jobs:
           # repos are pushed to (git push --mirror is a safe no-op
           # when the repo is already up to date).
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
+
+          # Capture exit code so manifest parsing runs even on
+          # partial failure (exit code 7 = some clones failed)
+          MIRROR_RC=0
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
@@ -1236,7 +1130,7 @@ jobs:
             --no-mirror \
             --discovery-method http \
             --https \
-            --verbose
+            --verbose || MIRROR_RC=$?
 
           # Extract counts from manifest for downstream reporting
           MANIFEST="$MIRROR_OUTPUT_PATH/mirror-manifest.json"
@@ -1256,6 +1150,10 @@ jobs:
             echo "failure-count=$FAILURE_COUNT"
             echo "total-count=$TOTAL_COUNT"
           } >> "$GITHUB_OUTPUT"
+
+          # Re-exit with the original code so the step still
+          # reports failure when there were clone errors
+          exit "$MIRROR_RC"
 
       - name: "Report sync results"
         if: always()
@@ -1288,8 +1186,7 @@ jobs:
     needs:
       - validate
       - prepare
-      - sync-test
-      - persist-gerrit
+      - deploy-gerrit
       - reset-orgs
       - sync-orgs
     if: always()
@@ -1311,13 +1208,12 @@ jobs:
             echo "|--------|---------|"
             echo "| Validation | ${{ needs.validate.result }} |"
             echo "| Preparation | ${{ needs.prepare.result }} |"
-            echo "| Sync Tests | ${{ needs.sync-test.result }} |"
             if [ "$PERSIST_MINUTES" != "0" ] && \
                [ "$DEBUG_COUNT" != "0" ]; then
-              echo "| Persist Sessions ($DEBUG_COUNT) \
-                | ${{ needs.persist-gerrit.result }} |"
+              echo "| Deploy Gerrit ($DEBUG_COUNT) \
+                | ${{ needs.deploy-gerrit.result }} |"
             elif [ "$DEBUG_COUNT" = "0" ]; then
-              echo "| Persist Sessions | skipped (selector: none) |"
+              echo "| Deploy Gerrit | skipped (selector: none) |"
             fi
             if [ "$RESET_ORGS" = "true" ]; then
               echo "| Reset Orgs \
@@ -1330,7 +1226,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Check overall result"
-        if: needs.sync-test.result != 'success'
+        if: >-
+          needs.deploy-gerrit.result == 'failure'
+          || needs.reset-orgs.result == 'failure'
+          || needs.sync-orgs.result == 'failure'
         run: |
-          echo "::error::One or more Gerrit server tests failed"
+          echo "::error::One or more jobs failed"
           exit 1
