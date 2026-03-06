@@ -533,7 +533,7 @@ jobs:
       - name: "Start Gerrit mirror: ${{ matrix.server.name }}"
         id: gerrit
         # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668
+        uses: modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668  # Testing
         with:
           gerrit_setup: |
             [{
@@ -992,6 +992,8 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
         with:
           enable-cache: false
+          # No checkout step in this job; suppress the empty workdir warning
+          ignore-empty-workdir: true
 
       - name: "Install gerrit-clone CLI"
         env:
@@ -1077,6 +1079,8 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
         with:
           enable-cache: false
+          # No checkout step in this job; suppress the empty workdir warning
+          ignore-empty-workdir: true
 
       - name: "Install gerrit-clone CLI"
         env:
