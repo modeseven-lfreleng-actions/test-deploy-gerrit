@@ -33,7 +33,7 @@ on:
         default: "onap"
         type: string
       persist_minutes:
-        description: "Persistent session duration (minutes, 0 to skip, max 25)"
+        description: "Persistent session duration (minutes, 0 to skip, max 600)"
         required: false
         default: 15
         type: number
@@ -123,10 +123,10 @@ jobs:
             echo "::error::persist_minutes must be an integer: $PERSIST_MINUTES"
             exit 1
           fi
-          if [ "$PERSIST_MINUTES" -gt 25 ]; then
+          if [ "$PERSIST_MINUTES" -gt 600 ]; then
             echo "::warning::persist_minutes capped" \
-              "at 25 (was: $PERSIST_MINUTES)"
-            PERSIST_MINUTES=25
+              "at 600 (was: $PERSIST_MINUTES)"
+            PERSIST_MINUTES=600
           fi
           echo "persist_minutes=$PERSIST_MINUTES" >> "$GITHUB_OUTPUT"
           echo "Validated persist_minutes: $PERSIST_MINUTES"
@@ -260,7 +260,7 @@ jobs:
       && needs.prepare.outputs.debug_count != '0'
     permissions:
       contents: read
-    timeout-minutes: 30
+    timeout-minutes: 605
     strategy:
       fail-fast: false
       matrix:
