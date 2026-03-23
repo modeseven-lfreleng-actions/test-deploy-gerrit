@@ -87,7 +87,7 @@ on:
         description: "Use gerrit-action from git ref"
         required: false
         # yamllint disable-line rule:line-length
-        default: "modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668"
+        default: "lfreleng-actions/gerrit-action@main"
         type: string
 
 concurrency:
