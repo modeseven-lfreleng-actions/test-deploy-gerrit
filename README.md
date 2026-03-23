@@ -28,22 +28,25 @@ You can trigger the workflow manually with optional parameters:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                   | Description                                                                         | Default |
-| ----------------------- | ----------------------------------------------------------------------------------- | ------- |
-| `debug`                 | Enable verbose debug output                                                         | `false` |
-| `sync_on_startup`       | Trigger pull-replication after container startup                                    | `true`  |
-| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax)) | `onap`  |
-| `persist_minutes`       | Persistent session duration (minutes, max 60)                                       | `15`    |
-| `match_api_path`        | Match origin server URL API path                                                    | `true`  |
-| `remote_access`         | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))       | `None`  |
-| `resync_orgs`           | Resync GitHub ORGs with Gerrit content                                              | `false` |
-| `resync_project_slugs`  | Resync these GitHub orgs (slug, see [Selector Syntax](#selector-syntax))            | `all`   |
+| Input                   | Description                                                                         | Default                               |
+| ----------------------- | ----------------------------------------------------------------------------------- | ------------------------------------- |
+| `debug`                 | Enable verbose debug output                                                         | `false`                               |
+| `sync_on_startup`       | Trigger pull-replication after container startup                                    | `true`                                |
+| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax)) | `onap`                                |
+| `persist_minutes`       | Persistent session duration (minutes, 0 to skip, max 600)                           | `15`                                  |
+| `match_api_path`        | Match origin server URL API path                                                    | `true`                                |
+| `remote_access`         | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))       | `None`                                |
+| `reset_orgs`            | Reset (delete all repos from) GitHub ORGs                                           | `false`                               |
+| `sync_orgs`             | Sync GitHub ORGs from Gerrit                                                        | `false`                               |
+| `sync_project_slugs`    | GitHub orgs to reset/sync (selector, see [Selector Syntax](#selector-syntax))       | `all`                                 |
+| `gerrit_clone_ref`      | Build gerrit-clone from git ref (`owner/repo@branch`); omit for PyPI                | _(feat/project-filtering)_            |
+| `gerrit_action_ref`     | Use gerrit-action from git ref (`owner/repo@branch`)                                | `lfreleng-actions/gerrit-action@main` |
 
 <!-- markdownlint-enable MD013 -->
 
 ### Selector Syntax
 
-Both `persist_project_slugs` and `resync_project_slugs` inputs support
+The `persist_project_slugs` and `sync_project_slugs` inputs support
 flexible matching:
 
 | Pattern        | Description               | Example                       |
@@ -63,38 +66,47 @@ persist_project_slugs: "onap"
 persist_project_slugs: "onap, oran, lf"
 
 # Match all gerrit-prefixed GitHub orgs
-resync_project_slugs: "*gerrit*"
+sync_project_slugs: "*gerrit*"
 
 # Match ONAP and O-RAN-SC orgs (both regular and gerrit variants)
-resync_project_slugs: "modeseven-onap, modeseven-gerrit-onap, modeseven-o-ran-sc"
+sync_project_slugs: "modeseven-onap, modeseven-gerrit-onap, modeseven-o-ran-sc"
 ```
 
-### Resync GitHub Organizations
+### Reset and Sync GitHub Organizations
 
-When you enable `resync_orgs`, the workflow will:
+The `reset_orgs` and `sync_orgs` inputs control GitHub organization
+lifecycle operations:
 
-1. **Reset**: Delete all repositories from the target GitHub organization(s)
-2. **Mirror**: Clone all content from the corresponding Gerrit server and push
-   to GitHub
+- **`reset_orgs`**: Delete all repositories from the target GitHub
+  organization(s).
+- **`sync_orgs`**: Mirror all content from the corresponding Gerrit
+  server and push to GitHub (respecting any
+  [project filters](#project-filtering) configured in
+  `GERRIT_SERVERS`).
 
-This uses the [gerrit-clone](https://github.com/lfreleng-actions/gerrit-clone-action)
-CLI tool (invoked via `uvx gerrit-clone`) to perform bulk operations. The
-resync jobs run **in parallel** with the Gerrit server deployment and
-sync/test jobs — they share no dependencies and do not block each other.
+You can enable either operation independently or both together. When
+you enable both, reset runs first and sync follows. These jobs run **in
+parallel** with the Gerrit server deployment — they share no
+dependencies and do not block each other.
 
-**⚠️ WARNING**: This is a destructive operation! The workflow deletes
-all existing repositories in the target GitHub organizations before mirroring.
+This uses the [gerrit-clone][gerrit-clone] CLI tool to perform bulk
+operations. The `gerrit_clone_ref` input controls which version of
+the tool to install (from a git ref or from PyPI).
 
-Use `resync_project_slugs` to select specific organizations:
+**⚠️ WARNING**: `reset_orgs` is a destructive operation! It deletes
+all existing repositories in the target GitHub organizations.
+
+Use `sync_project_slugs` to select specific organizations:
 
 ```bash
-# Resync ONAP organizations
-resync_orgs: true
-resync_project_slugs: "*onap*"
+# Sync ONAP organizations
+sync_orgs: true
+sync_project_slugs: "*onap*"
 
-# Resync gerrit-specific organizations
-resync_orgs: true
-resync_project_slugs: "*gerrit*"
+# Reset and sync gerrit-specific organizations
+reset_orgs: true
+sync_orgs: true
+sync_project_slugs: "*gerrit*"
 ```
 
 ## Configuration
@@ -103,20 +115,22 @@ resync_project_slugs: "*gerrit*"
 
 #### `GERRIT_SERVERS` (Required)
 
-A JSON array defining the Gerrit servers to test. Each server object should
-contain:
+A JSON array defining the Gerrit servers to test and mirror. Each server
+object should contain:
 
 <!-- markdownlint-disable MD013 -->
 
-| Field               | Required | Description                                                      |
-| ------------------- | -------- | ---------------------------------------------------------------- |
-| `name`              | Yes      | Display name for the server (e.g., "Linux Foundation")           |
-| `slug`              | Yes      | Short identifier used for container naming and credential lookup |
-| `gerrit`            | Yes      | Gerrit server hostname (e.g., "gerrit.linuxfoundation.org")      |
-| `api_path`          | No       | API path prefix if not at root (e.g., "/infra", "/r")            |
-| `project_filter`    | No       | Regex pattern to filter projects, empty = all projects           |
-| `github_org`        | No       | Target GitHub org for standard workflows                         |
-| `github_gerrit_org` | No       | Target GitHub org for gerrit_to_platform integrations            |
+| Field               | Required | Description                                                                  |
+| ------------------- | -------- | ---------------------------------------------------------------------------- |
+| `name`              | Yes      | Display name for the server (e.g., "Linux Foundation")                       |
+| `slug`              | Yes      | Short identifier used for container naming and credential lookup             |
+| `gerrit`            | Yes      | Gerrit server hostname (e.g., "gerrit.linuxfoundation.org")                  |
+| `api_path`          | No       | API path prefix if not at root (e.g., "/infra", "/r")                        |
+| `project_filter`    | No       | Regex pattern to filter projects, empty = all projects                       |
+| `github_org`        | No       | Target GitHub org for standard workflows                                     |
+| `github_gerrit_org` | No       | Target GitHub org for gerrit_to_platform integrations                        |
+| `include_projects`  | No       | Include filter for mirror sync (see [Project Filtering](#project-filtering)) |
+| `exclude_projects`  | No       | Exclude filter for mirror sync (see [Project Filtering](#project-filtering)) |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -140,7 +154,8 @@ contain:
     "api_path": "/r",
     "project_filter": "",
     "github_org": "modeseven-onap",
-    "github_gerrit_org": "modeseven-gerrit-onap"
+    "github_gerrit_org": "modeseven-gerrit-onap",
+    "exclude_projects": "testsuite/pythonsdk-tests"
   },
   {
     "name": "O-RAN-SC",
@@ -171,6 +186,53 @@ The `project_filter` field supports:
 - **Literal name**: Match exact project name (e.g., `"releng/lftools"`)
 - **Comma-separated**: Two or more projects (e.g., `"releng/lftools,ci-management"`)
 - **Regex pattern**: Match projects by pattern (e.g., `"releng/.*"`)
+
+### Project Filtering
+
+The `include_projects` and `exclude_projects` fields control which
+Gerrit projects the workflow mirrors to GitHub during sync
+operations. Both fields accept comma or space-separated lists of
+Gerrit project names. When you specify both, the workflow applies
+include filters first, then exclude filters remove matches from
+the result.
+
+The workflow threads these fields through the matrix to the
+`gerrit-clone mirror` command as `--include-projects` /
+`--exclude-projects` arguments. They support the same pattern
+syntax as the
+[gerrit-clone filtering engine][gerrit-clone]:
+
+<!-- markdownlint-disable MD013 -->
+
+| Pattern         | Description                        | Example                      |
+| --------------- | ---------------------------------- | ---------------------------- |
+| Exact name      | Matches one project                | `testsuite/pythonsdk-tests`  |
+| Hierarchical    | Matches project and all children   | `ccsdk` matches `ccsdk/apps` |
+| Wildcards       | Shell-style `*`, `?`, `[seq]`      | `testsuite/*`                |
+| Comma-separated | Two or more patterns in one string | `ccsdk, oom, cps`            |
+
+<!-- markdownlint-enable MD013 -->
+
+**Examples:**
+
+```jsonc
+// Exclude a project containing a leaked credential
+{ "exclude_projects": "testsuite/pythonsdk-tests" }
+
+// Mirror specific project hierarchies
+{ "include_projects": "ccsdk, oom, cps" }
+
+// Include a broad set, then carve out exceptions
+{
+  "include_projects": "testsuite",
+  "exclude_projects": "testsuite/pythonsdk-tests"
+}
+```
+
+> **Note:** When `include_projects` is empty (the default), the
+> workflow mirrors all discovered projects. When `exclude_projects`
+> is empty, the workflow skips nothing. Servers without either field
+> mirror all projects, preserving existing behaviour.
 
 ### Repository Secrets
 
@@ -246,31 +308,52 @@ translation.
 See [Tailscale Setup](#tailscale-setup) below for full instructions
 on creating these credentials.
 
-#### `ORG_ADMIN_TOKEN` (Required for resync)
+#### `ACTIONS_STEP_DEBUG` (Optional)
 
-A GitHub Personal Access Token (Classic) with the following permissions:
+When set to `true`, enables debug output for the workflow. The
+validation job checks this alongside the `debug` input and GitHub's
+built-in `RUNNER_DEBUG` flag — if any of the three is active, the
+workflow produces verbose logging.
 
-- `repo` - Full control of private repositories
-- `delete_repo` - Delete repositories
-- `admin:org` - Full control of organizations (for creating repos in orgs)
+#### `ORG_ADMIN_TOKEN` (Required for reset/sync)
 
-The resync job uses this token to delete and recreate repositories in
-the target GitHub organizations.
+A GitHub Personal Access Token (Classic) with the following
+permissions:
+
+- `repo` — Full control of private repositories
+- `delete_repo` — Delete repositories
+- `admin:org` — Full control of organizations
+
+The reset and sync jobs use this token to delete and recreate
+repositories in the target GitHub organizations.
+
+### Repository Variables (continued)
+
+#### `GERRIT_PUBLIC_KEYS` (Optional)
+
+SSH public keys passed to the `gerrit-action` for configuring SSH
+access on the local Gerrit container. Set this as a repository
+variable (not a secret) containing one or more SSH public keys.
 
 ## Outputs
 
-Each test job outputs:
+Each deploy job outputs:
 
 - Container connectivity status
 - API path detection results
 - Replication status (when `sync_on_startup` option set)
 - SSH host keys for the local Gerrit container
+- Connection info with URLs and SSH commands (in job summary)
 
-Resync jobs output:
+Reset jobs output:
 
-- Reset status (repositories deleted)
-- Mirror manifest with success/failure counts
-- Duration and per-repository status
+- Per-organization reset status
+
+Sync jobs output:
+
+- Mirror manifest with total/succeeded/failed counts
+- Active project filters (if configured)
+- Per-organization sync status with Gerrit server details
 
 ## Tailscale Setup
 
