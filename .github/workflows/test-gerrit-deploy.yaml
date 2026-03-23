@@ -928,6 +928,10 @@ jobs:
 
           # Build full matrix: for each server, create entries for both
           # github_org and github_gerrit_org
+          # include_projects/exclude_projects are optional fields in
+          # GERRIT_SERVERS; when absent they default to empty string.
+          # These are passed through to gerrit-clone mirror as
+          # --include-projects / --exclude-projects CLI arguments.
           FULL_MATRIX=$(echo "$GERRIT_SERVERS" | jq -c '
             [.[] |
               {
@@ -935,14 +939,18 @@ jobs:
                 gerrit: .gerrit,
                 api_path: .api_path,
                 name: .name,
-                slug: .slug
+                slug: .slug,
+                include_projects: (.include_projects // ""),
+                exclude_projects: (.exclude_projects // "")
               },
               {
                 github_org: .github_gerrit_org,
                 gerrit: .gerrit,
                 api_path: .api_path,
                 name: .name,
-                slug: .slug
+                slug: .slug,
+                include_projects: (.include_projects // ""),
+                exclude_projects: (.exclude_projects // "")
               }
             ]
           ')
@@ -1141,6 +1149,9 @@ jobs:
           GITHUB_ORG: ${{ matrix.org.github_org }}
           GERRIT_SERVER: ${{ matrix.org.gerrit }}
           MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
+          # Project filtering (optional, from GERRIT_SERVERS variable)
+          INCLUDE_PROJECTS: ${{ matrix.org.include_projects }}
+          EXCLUDE_PROJECTS: ${{ matrix.org.exclude_projects }}
         run: |
           # Verify token is available
           if [ -z "$ORG_ADMIN_TOKEN" ]; then
@@ -1155,6 +1166,43 @@ jobs:
           # when the repo is already up to date).
           echo "Mirroring $GERRIT_SERVER -> $GITHUB_ORG"
 
+          # Build project filtering arguments from matrix values
+          # These come from include_projects/exclude_projects fields
+          # in the GERRIT_SERVERS repository variable and support
+          # comma or space-separated lists of Gerrit project names
+          # with shell-style wildcards (*, ?, [seq])
+          FILTER_ARGS=()
+
+          if [ -n "$INCLUDE_PROJECTS" ]; then
+            # Split on commas and spaces, pass each as a separate arg
+            read -ra INCLUDES \
+              <<< "$(printf '%s' "$INCLUDE_PROJECTS" | tr ',' ' ')"
+            for project in "${INCLUDES[@]}"; do
+              project=$(echo "$project" | xargs)  # trim whitespace
+              if [ -n "$project" ]; then
+                FILTER_ARGS+=(--include-projects "$project")
+              fi
+            done
+            echo "Include filter: ${INCLUDES[*]}"
+          fi
+
+          if [ -n "$EXCLUDE_PROJECTS" ]; then
+            # Split on commas and spaces, pass each as a separate arg
+            read -ra EXCLUDES \
+              <<< "$(printf '%s' "$EXCLUDE_PROJECTS" | tr ',' ' ')"
+            for project in "${EXCLUDES[@]}"; do
+              project=$(echo "$project" | xargs)  # trim whitespace
+              if [ -n "$project" ]; then
+                FILTER_ARGS+=(--exclude-projects "$project")
+              fi
+            done
+            echo "Exclude filter: ${EXCLUDES[*]}"
+          fi
+
+          if [ ${#FILTER_ARGS[@]} -eq 0 ]; then
+            echo "No project filters configured"
+          fi
+
           # Capture exit code so manifest parsing runs even on
           # partial failure (exit code 7 = some clones failed)
           MIRROR_RC=0
@@ -1166,7 +1214,8 @@ jobs:
             --overwrite \
             --no-mirror \
             --discovery-method http \
-            --https || MIRROR_RC=$?
+            --https \
+            "${FILTER_ARGS[@]}" || MIRROR_RC=$?
 
           # Extract counts from manifest for downstream reporting
           MANIFEST="$MIRROR_OUTPUT_PATH/mirror-manifest.json"
@@ -1199,6 +1248,8 @@ jobs:
           SUCCESS_COUNT: ${{ steps.mirror.outputs.success-count }}
           FAILURE_COUNT: ${{ steps.mirror.outputs.failure-count }}
           TOTAL_COUNT: ${{ steps.mirror.outputs.total-count }}
+          INCLUDE_PROJECTS: ${{ matrix.org.include_projects }}
+          EXCLUDE_PROJECTS: ${{ matrix.org.exclude_projects }}
         run: |
           {
             echo "## Sync: $GITHUB_ORG"
@@ -1211,6 +1262,12 @@ jobs:
             echo "| Total | $TOTAL_COUNT |"
             echo "| Succeeded | $SUCCESS_COUNT |"
             echo "| Failed | $FAILURE_COUNT |"
+            if [ -n "$INCLUDE_PROJECTS" ]; then
+              echo "| Include Filter | \`$INCLUDE_PROJECTS\` |"
+            fi
+            if [ -n "$EXCLUDE_PROJECTS" ]; then
+              echo "| Exclude Filter | \`$EXCLUDE_PROJECTS\` |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
 
