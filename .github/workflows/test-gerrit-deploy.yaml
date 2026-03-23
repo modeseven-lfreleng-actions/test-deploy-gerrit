@@ -78,7 +78,16 @@ on:
         description: "Build gerrit-clone from git ref"
         required: false
         # yamllint disable-line rule:line-length
-        default: "modeseven-lfreleng-actions/gerrit-clone-action@feat/reset-mirror-improvements"
+        default: "modeseven-lfreleng-actions/gerrit-clone-action@feat/project-filtering"
+        type: string
+      gerrit_action_ref:
+        # e.g. modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668
+        # Format: owner/repo@branch (checked out and used locally)
+        # When unset, defaults to upstream main branch
+        description: "Use gerrit-action from git ref"
+        required: false
+        # yamllint disable-line rule:line-length
+        default: "modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668"
         type: string
 
 concurrency:
@@ -266,6 +275,30 @@ jobs:
       - name: "Checkout repository"
         # yamllint disable-line rule:line-length
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: "Parse gerrit-action ref"
+        id: gerrit-action-ref
+        env:
+          # yamllint disable-line rule:line-length
+          ACTION_REF: ${{ inputs.gerrit_action_ref || 'lfreleng-actions/gerrit-action@main' }}
+        run: |
+          # Parse owner/repo@branch format
+          REPO="${ACTION_REF%%@*}"
+          BRANCH="${ACTION_REF#*@}"
+          if [ "$BRANCH" = "$ACTION_REF" ]; then
+            BRANCH="main"
+          fi
+          echo "repository=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Using gerrit-action: $REPO @ $BRANCH"
+
+      - name: "Checkout gerrit-action"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ steps.gerrit-action-ref.outputs.repository }}
+          ref: ${{ steps.gerrit-action-ref.outputs.ref }}
+          path: .gerrit-action
 
       - name: "Lookup credentials for ${{ matrix.server.slug }}"
         id: credentials
@@ -532,8 +565,9 @@ jobs:
 
       - name: "Start Gerrit mirror: ${{ matrix.server.name }}"
         id: gerrit
-        # yamllint disable-line rule:line-length
-        uses: modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668
+        # Ref controlled by gerrit_action_ref input; defaults to
+        # upstream main when unset (see checkout step above)
+        uses: ./.gerrit-action
         with:
           gerrit_setup: |
             [{
@@ -992,6 +1026,8 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
         with:
           enable-cache: false
+          # No checkout step in this job; suppress the empty workdir warning
+          ignore-empty-workdir: true
 
       - name: "Install gerrit-clone CLI"
         env:
@@ -1077,6 +1113,8 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7.6.0
         with:
           enable-cache: false
+          # No checkout step in this job; suppress the empty workdir warning
+          ignore-empty-workdir: true
 
       - name: "Install gerrit-clone CLI"
         env:
