@@ -1204,11 +1204,6 @@ jobs:
                 FILTER_ARGS+=(--exclude-projects "$project")
               fi
             done
-
-          fi
-
-          if [ ${#FILTER_ARGS[@]} -eq 0 ]; then
-            echo "No project filters configured"
           fi
 
           # Capture exit code so manifest parsing runs even on
