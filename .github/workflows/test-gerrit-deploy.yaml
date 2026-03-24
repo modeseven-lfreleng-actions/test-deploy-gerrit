@@ -1012,7 +1012,7 @@ jobs:
   reset-orgs:
     name: "Reset: ${{ matrix.org.github_org }}"
     runs-on: ubuntu-latest
-    needs: [resync-orgs-prepare]
+    needs: [validate, resync-orgs-prepare]
     if: ${{ inputs.reset_orgs == true }}
     permissions:
       contents: read
@@ -1059,6 +1059,7 @@ jobs:
         env:
           ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
+          VERBOSE_DEBUG: ${{ needs.validate.outputs.effective_debug }}
         run: |
           # Verify token is available
           if [ -z "$ORG_ADMIN_TOKEN" ]; then
@@ -1071,10 +1072,15 @@ jobs:
 
           # Reset (delete all repos from) the GitHub org
           echo "Resetting GitHub org: $GITHUB_ORG"
+          VERBOSE_ARGS=()
+          if [ "$VERBOSE_DEBUG" = "true" ]; then
+            VERBOSE_ARGS+=(--verbose)
+          fi
           gerrit-clone reset \
             --org "$GITHUB_ORG" \
             --github-token "$ORG_ADMIN_TOKEN" \
-            --no-confirm
+            --no-confirm \
+            "${VERBOSE_ARGS[@]}"
 
       - name: "Report reset results"
         if: always()
@@ -1093,11 +1099,12 @@ jobs:
   sync-orgs:
     name: "Sync: ${{ matrix.org.github_org }}"
     runs-on: ubuntu-latest
-    needs: [resync-orgs-prepare, reset-orgs]
+    needs: [validate, resync-orgs-prepare, reset-orgs]
     # Run when sync is requested, even if reset-orgs was skipped
     if: >-
       ${{ always()
           && inputs.sync_orgs == true
+          && needs.validate.result == 'success'
           && needs.resync-orgs-prepare.result == 'success'
           && (needs.reset-orgs.result == 'success'
               || needs.reset-orgs.result == 'skipped') }}
@@ -1149,6 +1156,7 @@ jobs:
           GITHUB_ORG: ${{ matrix.org.github_org }}
           GERRIT_SERVER: ${{ matrix.org.gerrit }}
           MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
+          VERBOSE_DEBUG: ${{ needs.validate.outputs.effective_debug }}
           # Project filtering (optional, from GERRIT_SERVERS variable)
           INCLUDE_PROJECTS: ${{ matrix.org.include_projects }}
           EXCLUDE_PROJECTS: ${{ matrix.org.exclude_projects }}
@@ -1183,7 +1191,7 @@ jobs:
                 FILTER_ARGS+=(--include-projects "$project")
               fi
             done
-            echo "Include filter: ${INCLUDES[*]}"
+
           fi
 
           if [ -n "$EXCLUDE_PROJECTS" ]; then
@@ -1196,7 +1204,7 @@ jobs:
                 FILTER_ARGS+=(--exclude-projects "$project")
               fi
             done
-            echo "Exclude filter: ${EXCLUDES[*]}"
+
           fi
 
           if [ ${#FILTER_ARGS[@]} -eq 0 ]; then
@@ -1206,6 +1214,10 @@ jobs:
           # Capture exit code so manifest parsing runs even on
           # partial failure (exit code 7 = some clones failed)
           MIRROR_RC=0
+          VERBOSE_ARGS=()
+          if [ "$VERBOSE_DEBUG" = "true" ]; then
+            VERBOSE_ARGS+=(--verbose)
+          fi
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
@@ -1215,6 +1227,7 @@ jobs:
             --no-mirror \
             --discovery-method http \
             --https \
+            "${VERBOSE_ARGS[@]}" \
             "${FILTER_ARGS[@]}" || MIRROR_RC=$?
 
           # Extract counts from manifest for downstream reporting
