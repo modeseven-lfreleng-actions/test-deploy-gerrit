@@ -87,7 +87,7 @@ on:
         description: "Use gerrit-action from git ref"
         required: false
         # yamllint disable-line rule:line-length
-        default: "lfreleng-actions/gerrit-action@main"
+        default: "modeseven-lfreleng-actions/gerrit-action@fix/gerrit-auth-api-calls"
         type: string
 
 concurrency:
