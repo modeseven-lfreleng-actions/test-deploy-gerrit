@@ -78,7 +78,7 @@ on:
         description: "Build gerrit-clone from git ref"
         required: false
         # yamllint disable-line rule:line-length
-        default: "modeseven-lfreleng-actions/gerrit-clone-action@feat/robust-rate-limiting"
+        default: "modeseven-lfreleng-actions/gerrit-clone-action@feat/content-filtering"
         type: string
       gerrit_action_ref:
         # e.g. modeseven-lfreleng-actions/gerrit-action@fix/docker-pep668
