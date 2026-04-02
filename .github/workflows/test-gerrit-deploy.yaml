@@ -88,8 +88,17 @@ on:
         required: false
         # yamllint disable-line rule:line-length
         # default: "lfreleng-actions/gerrit-action@main"
-        default: "modeseven-lfreleng-actions/gerrit-action@configure-g2p"
+        default: "modeseven-lfreleng-actions/gerrit-action@integration-updates"
         type: string
+      g2p_org_setup:
+        description: "G2P org setup mode"
+        required: false
+        type: choice
+        options:
+          - provision
+          - verify
+          - skip
+        default: 'provision'
       configure_g2p:
         # Configures gerrit_to_platform inside the deployed Gerrit
         # container. Only effective when persistent sessions are
@@ -624,6 +633,12 @@ jobs:
           g2p_github_owner: "modeseven-gerrit-${{ matrix.server.slug }}"
           g2p_remote_name_style: 'dash'
           g2p_validation_mode: 'warn'
+          g2p_org_setup: ${{ inputs.g2p_org_setup }}
+          g2p_org_token_map: >-
+            ${{
+              inputs.g2p_org_setup == 'provision' &&
+                secrets.G2P_ORG_TOKENS || ''
+            }}
 
       - name: "Verify tunnel connectivity"
         if: inputs.remote_access != 'None'
