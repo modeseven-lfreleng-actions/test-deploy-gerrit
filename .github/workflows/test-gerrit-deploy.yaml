@@ -90,15 +90,6 @@ on:
         # default: "lfreleng-actions/gerrit-action@main"
         default: "modeseven-lfreleng-actions/gerrit-action@integration-updates"
         type: string
-      g2p_org_setup:
-        description: "G2P org setup mode"
-        required: false
-        type: choice
-        options:
-          - provision
-          - verify
-          - skip
-        default: 'provision'
       configure_g2p:
         # Configures gerrit_to_platform inside the deployed Gerrit
         # container. Only effective when persistent sessions are
@@ -108,6 +99,29 @@ on:
         required: false
         default: false
         type: boolean
+      g2p_org_setup:
+        description: "G2P org setup mode"
+        required: false
+        type: choice
+        options:
+          - provision
+          - verify
+          - skip
+        default: 'provision'
+      remove_files:
+        description: >-
+          File patterns to remove from cloned repos
+          before pushing (e.g. '.github/**')
+        required: false
+        default: ".github/**"
+        type: string
+      git_filter_projects:
+        description: >-
+          Project patterns for git history token replacement
+          (semicolon-separated, tokens from GIT_FILTER_TOKENS)
+        required: false
+        default: "testsuite/pythonsdk-tests"
+        type: string
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -1212,6 +1226,9 @@ jobs:
           # Project filtering (optional, from GERRIT_SERVERS variable)
           INCLUDE_PROJECTS: ${{ matrix.org.include_projects }}
           EXCLUDE_PROJECTS: ${{ matrix.org.exclude_projects }}
+          REMOVE_FILES: ${{ inputs.remove_files }}
+          GIT_FILTER_PROJECTS: ${{ inputs.git_filter_projects }}
+          GIT_FILTER_TOKENS: ${{ secrets.GIT_FILTER_TOKENS }}
         run: |
           # Verify token is available
           if [ -z "$ORG_ADMIN_TOKEN" ]; then
@@ -1256,6 +1273,42 @@ jobs:
                 FILTER_ARGS+=(--exclude-projects "$project")
               fi
             done
+          fi
+
+          # Content filtering: remove file patterns
+          if [ -n "$REMOVE_FILES" ]; then
+            FILTER_ARGS+=(--remove-files "$REMOVE_FILES")
+          fi
+
+          # Content filtering: git history token replacement
+          # GIT_FILTER_PROJECTS holds project patterns (from input)
+          # GIT_FILTER_TOKENS holds the actual secrets (from repo secret)
+          # Format expected by --git-filter:
+          #   'project:token1,token2;project2:token3'
+          # Assemble the spec by pairing each project with the token(s)
+          if [ -n "$GIT_FILTER_PROJECTS" ] && [ -n "$GIT_FILTER_TOKENS" ]; then
+            GIT_FILTER_SPEC=""
+            IFS=';' read -ra PROJECTS <<< "$GIT_FILTER_PROJECTS"
+            IFS=';' read -ra TOKENS <<< "$GIT_FILTER_TOKENS"
+            for i in "${!PROJECTS[@]}"; do
+              proj=$(echo "${PROJECTS[$i]}" | xargs)
+              # Use matching token or last available token
+              if [ "$i" -lt "${#TOKENS[@]}" ]; then
+                tok=$(echo "${TOKENS[$i]}" | xargs)
+              else
+                tok=$(echo "${TOKENS[-1]}" | xargs)
+              fi
+              if [ -n "$proj" ] && [ -n "$tok" ]; then
+                if [ -n "$GIT_FILTER_SPEC" ]; then
+                  GIT_FILTER_SPEC+=";${proj}:${tok}"
+                else
+                  GIT_FILTER_SPEC="${proj}:${tok}"
+                fi
+              fi
+            done
+            if [ -n "$GIT_FILTER_SPEC" ]; then
+              FILTER_ARGS+=(--git-filter "$GIT_FILTER_SPEC")
+            fi
           fi
 
           # Capture exit code so manifest parsing runs even on
