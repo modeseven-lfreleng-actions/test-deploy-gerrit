@@ -878,7 +878,7 @@ jobs:
             if [ "$REMOTE_ACCESS" != "None" ]; then
               echo "> ⚠️ **Warning**: URLs are publicly accessible!"
             else
-              echo "> ℹ️ **Note**: Local access only (remote access disabled)"
+              echo "ℹ️ **Note**: Local access only (remote access disabled)"
             fi
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1431,7 +1431,29 @@ jobs:
                 | ${{ needs.sync-orgs.result }} |"
             fi
             if [ "$CONFIGURE_G2P" = "true" ]; then
-              echo "| G2P Integration | enabled |"
+              # Reflect the actual deploy-gerrit job outcome
+              # (which is where G2P configuration runs) rather
+              # than the bare "enabled" flag.  If the deploy job
+              # failed or was cancelled, G2P did not succeed.
+              DEPLOY_RESULT="${{ needs.deploy-gerrit.result }}"
+              case "$DEPLOY_RESULT" in
+                success)
+                  G2P_STATUS="✅ succeeded"
+                  ;;
+                failure)
+                  G2P_STATUS="❌ failed"
+                  ;;
+                cancelled)
+                  G2P_STATUS="⚠️ cancelled"
+                  ;;
+                skipped)
+                  G2P_STATUS="skipped"
+                  ;;
+                *)
+                  G2P_STATUS="$DEPLOY_RESULT"
+                  ;;
+              esac
+              echo "| G2P Integration | $G2P_STATUS |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
