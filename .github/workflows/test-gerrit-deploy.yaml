@@ -50,7 +50,7 @@ on:
         # Makes Gerrit instance accessible from outside GitHub
         description: "Enable remote Gerrit access"
         required: false
-        default: "None"
+        default: "Tailscale"
         type: choice
         options:
           - "None"
@@ -97,7 +97,7 @@ on:
         # is derived from the server slug: modeseven-gerrit-<slug>
         description: "Configure Gerrit to Platform (g2p)"
         required: false
-        default: false
+        default: true
         type: boolean
       g2p_org_setup:
         description: "G2P org setup mode"
