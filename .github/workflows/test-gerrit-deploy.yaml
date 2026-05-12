@@ -112,20 +112,28 @@ on:
         # Optional override that re-installs gerrit_to_platform inside
         # the running Gerrit container from a Git ref (branch, tag,
         # commit SHA, or Gerrit change ref such as
-        # 'refs/changes/74/74274/1').  When empty the container keeps
+        # 'refs/changes/76/74276/1').  When empty the container keeps
         # the version pinned in gerrit-action/docker/requirements.txt.
         #
-        # Default: the open Gerrit change introducing the centralised
-        # logging framework (change 74274, patchset 1).  Bump the
-        # trailing digit when a new patchset lands, or clear the
-        # field once a release ships to PyPI.  To revert: set this
-        # input to an empty string at dispatch time.
+        # Default: the chained-tip Gerrit change in the open
+        # gerrit_to_platform fix series (change 74276, patchset 1),
+        # which carries:
+        #   * 74274 — Feat(logging): Add centralised logging framework
+        #   * 74275 — Fix(helpers): Support Gerrit 3.x compact change-id
+        #   * 74276 — Fix(config): Allow duplicate keys in
+        #               replication.config
+        # Installing this single ref pulls in the two parent changes
+        # via git-history.  Bump the trailing digit when a new
+        # patchset lands on any change in the chain (the tip change
+        # number rises with each reroll), or clear the field once a
+        # release ships to PyPI.  To revert: set this input to an
+        # empty string at dispatch time.
         description: >-
           Optional Git ref to install gerrit_to_platform from
           (branch, tag, SHA, or 'refs/changes/<NN>/<num>/<ps>').
           Empty leaves the container's pinned release in place.
         required: false
-        default: 'refs/changes/74/74274/1'
+        default: 'refs/changes/76/74276/1'
         type: string
       g2p_install_repo:
         # Source repository for the g2p override install.  Default
@@ -690,7 +698,7 @@ jobs:
       # Activated only when 'g2p_install_ref' is non-empty.  Clones the
       # gerrit_to_platform repository on the runner, checks out the
       # requested ref (branch, tag, SHA or Gerrit change refspec such
-      # as 'refs/changes/74/74274/1'), copies the working tree into
+      # as 'refs/changes/76/74276/1'), copies the working tree into
       # every running container and re-installs the package over the
       # pinned release inside '/opt/gerrit-tools'.
       #
