@@ -775,10 +775,26 @@ jobs:
             # the hash-pinned transitive dependencies.  'uv' itself
             # lives at /usr/local/bin/uv (see gerrit-action's
             # Dockerfile); /opt/gerrit-tools is the venv it manages.
+            #
+            # 'docker cp' preserves the runner's UID/GID on the
+            # copied tree, which clashes with 'docker exec --user
+            # root' below: setuptools_scm's git introspection then
+            # trips over Git's 'dubious ownership' safety check.
+            # 'chown' brings the staged tree under root so the
+            # build runs cleanly.  We also pin the package version
+            # via SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<DIST_NAME> to
+            # bypass git introspection entirely (the shallow clone
+            # cannot derive a meaningful version anyway).
             docker exec --user root "${CID}" rm -rf /tmp/g2p-override
             docker cp "${WORKDIR}/g2p" "${CID}:/tmp/g2p-override"
-
             docker exec --user root "${CID}" \
+              chown -R root:root /tmp/g2p-override
+
+            PRETEND_VERSION="0+gerrit.${RESOLVED_SHA:0:7}"
+            SCM_VAR=SETUPTOOLS_SCM_PRETEND_VERSION_FOR_GERRIT_TO_PLATFORM
+            docker exec --user root \
+              -e "${SCM_VAR}=${PRETEND_VERSION}" \
+              "${CID}" \
               /usr/local/bin/uv pip install \
                 --python /opt/gerrit-tools/bin/python \
                 --upgrade --force-reinstall --no-deps \
