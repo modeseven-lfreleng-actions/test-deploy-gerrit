@@ -28,19 +28,21 @@ You can trigger the workflow manually with optional parameters:
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                   | Description                                                                         | Default                               |
-| ----------------------- | ----------------------------------------------------------------------------------- | ------------------------------------- |
-| `debug`                 | Enable verbose debug output                                                         | `false`                               |
-| `sync_on_startup`       | Trigger pull-replication after container startup                                    | `true`                                |
-| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax)) | `onap`                                |
-| `persist_minutes`       | Persistent session duration (minutes, 0 to skip, max 600)                           | `15`                                  |
-| `match_api_path`        | Match origin server URL API path                                                    | `true`                                |
-| `remote_access`         | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))       | `None`                                |
-| `reset_orgs`            | Reset (delete all repos from) GitHub ORGs                                           | `false`                               |
-| `sync_orgs`             | Sync GitHub ORGs from Gerrit                                                        | `false`                               |
-| `sync_project_slugs`    | GitHub orgs to reset/sync (selector, see [Selector Syntax](#selector-syntax))       | `all`                                 |
-| `gerrit_clone_ref`      | Build gerrit-clone from git ref (`owner/repo@branch`); omit for PyPI                | _(feat/project-filtering)_            |
-| `gerrit_action_ref`     | Use gerrit-action from git ref (`owner/repo@branch`)                                | `lfreleng-actions/gerrit-action@main` |
+| Input                   | Description                                                                                                                                                            | Default                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `debug`                 | Enable verbose debug output                                                                                                                                            | `false`                                                              |
+| `sync_on_startup`       | Trigger pull-replication after container startup                                                                                                                       | `true`                                                               |
+| `persist_project_slugs` | Persistent session selector (project slug, see [Selector Syntax](#selector-syntax))                                                                                    | `onap`                                                               |
+| `persist_minutes`       | Persistent session duration (minutes, 0 to skip, max 600)                                                                                                              | `15`                                                                 |
+| `match_api_path`        | Match origin server URL API path                                                                                                                                       | `true`                                                               |
+| `remote_access`         | Enable remote Gerrit access (`None`, `Bore`, [`Tailscale`](#tailscale-setup))                                                                                          | `None`                                                               |
+| `reset_orgs`            | Reset (delete all repos from) GitHub ORGs                                                                                                                              | `false`                                                              |
+| `sync_orgs`             | Sync GitHub ORGs from Gerrit                                                                                                                                           | `false`                                                              |
+| `sync_project_slugs`    | GitHub orgs to reset/sync (selector, see [Selector Syntax](#selector-syntax))                                                                                          | `all`                                                                |
+| `gerrit_clone_ref`      | Build gerrit-clone from git ref (`owner/repo@branch`); omit for PyPI                                                                                                   | _(feat/project-filtering)_                                           |
+| `gerrit_action_ref`     | Use gerrit-action from git ref (`owner/repo@branch`)                                                                                                                   | `lfreleng-actions/gerrit-action@main`                                |
+| `g2p_install_ref`       | Optional git ref (branch, tag, SHA, or `refs/changes/<NN>/<num>/<ps>`) to install `gerrit_to_platform` from after the container starts; empty keeps the pinned release | _(empty)_                                                            |
+| `g2p_install_repo`      | Source HTTPS Git URL for `g2p_install_ref` (consulted when the ref input has a value)                                                                                  | `https://gerrit.linuxfoundation.org/infra/releng/gerrit_to_platform` |
 
 <!-- markdownlint-enable MD013 -->
 
