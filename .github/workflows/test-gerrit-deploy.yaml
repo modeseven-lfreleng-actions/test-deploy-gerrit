@@ -114,13 +114,18 @@ on:
         # commit SHA, or Gerrit change ref such as
         # 'refs/changes/74/74274/1').  When empty the container keeps
         # the version pinned in gerrit-action/docker/requirements.txt.
-        # To revert: leave this input blank (the default).
+        #
+        # Default: the open Gerrit change introducing the centralised
+        # logging framework (change 74274, patchset 1).  Bump the
+        # trailing digit when a new patchset lands, or clear the
+        # field once a release ships to PyPI.  To revert: set this
+        # input to an empty string at dispatch time.
         description: >-
           Optional Git ref to install gerrit_to_platform from
           (branch, tag, SHA, or 'refs/changes/<NN>/<num>/<ps>').
           Empty leaves the container's pinned release in place.
         required: false
-        default: ''
+        default: 'refs/changes/74/74274/1'
         type: string
       g2p_install_repo:
         # Source repository for the g2p override install.  Default
@@ -767,12 +772,14 @@ jobs:
 
             # Drop the working tree into the container and install
             # over the existing venv.  '--no-deps' avoids touching
-            # the hash-pinned transitive dependencies.
+            # the hash-pinned transitive dependencies.  'uv' itself
+            # lives at /usr/local/bin/uv (see gerrit-action's
+            # Dockerfile); /opt/gerrit-tools is the venv it manages.
             docker exec --user root "${CID}" rm -rf /tmp/g2p-override
             docker cp "${WORKDIR}/g2p" "${CID}:/tmp/g2p-override"
 
             docker exec --user root "${CID}" \
-              /opt/gerrit-tools/bin/uv pip install \
+              /usr/local/bin/uv pip install \
                 --python /opt/gerrit-tools/bin/python \
                 --upgrade --force-reinstall --no-deps \
                 /tmp/g2p-override
