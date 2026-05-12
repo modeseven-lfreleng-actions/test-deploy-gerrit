@@ -108,6 +108,31 @@ on:
           - verify
           - skip
         default: 'provision'
+      g2p_install_ref:
+        # Optional override that re-installs gerrit_to_platform inside
+        # the running Gerrit container from a Git ref (branch, tag,
+        # commit SHA, or Gerrit change ref such as
+        # 'refs/changes/74/74274/1').  When empty the container keeps
+        # the version pinned in gerrit-action/docker/requirements.txt.
+        # To revert: leave this input blank (the default).
+        description: >-
+          Optional Git ref to install gerrit_to_platform from
+          (branch, tag, SHA, or 'refs/changes/<NN>/<num>/<ps>').
+          Empty leaves the container's pinned release in place.
+        required: false
+        default: ''
+        type: string
+      g2p_install_repo:
+        # Source repository for the g2p override install.  Default
+        # points at the Linux Foundation Gerrit instance (anonymous
+        # HTTPS read).  Only consulted when g2p_install_ref is set.
+        description: >-
+          HTTPS Git URL to fetch gerrit_to_platform from when
+          g2p_install_ref is set
+        required: false
+        default: >-
+          https://gerrit.linuxfoundation.org/infra/releng/gerrit_to_platform
+        type: string
       remove_files:
         description: >-
           File patterns to remove from cloned repos
@@ -653,6 +678,128 @@ jobs:
               inputs.g2p_org_setup == 'provision' &&
                 secrets.G2P_ORG_TOKENS || ''
             }}
+
+      # ================================================================
+      # OPTIONAL: PATCH gerrit_to_platform FROM A GIT REF
+      # ================================================================
+      # Activated only when 'g2p_install_ref' is non-empty.  Clones the
+      # gerrit_to_platform repository on the runner, checks out the
+      # requested ref (branch, tag, SHA or Gerrit change refspec such
+      # as 'refs/changes/74/74274/1'), copies the working tree into
+      # every running container and re-installs the package over the
+      # pinned release inside '/opt/gerrit-tools'.
+      #
+      # The container's baseline pinned release (see
+      # gerrit-action/docker/requirements.txt) is preserved when this
+      # input is left at its empty default; reverting the override is
+      # simply a matter of clearing the workflow input or removing
+      # this step.  We use '--no-deps' because the framework is
+      # standard-library only — no transitive deps need to change.
+      - name: "Patch gerrit_to_platform from git ref"
+        id: patch-g2p
+        if: >-
+          inputs.configure_g2p == true &&
+          inputs.g2p_install_ref != '' &&
+          steps.gerrit.outputs.container_ids != ''
+        shell: bash
+        env:
+          G2P_INSTALL_REF: ${{ inputs.g2p_install_ref }}
+          G2P_INSTALL_REPO: ${{ inputs.g2p_install_repo }}
+          CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
+          DEBUG: ${{ needs.validate.outputs.effective_debug }}
+        run: |
+          set -euo pipefail
+
+          if [ "${DEBUG:-false}" = "true" ]; then
+            set -x
+          fi
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq is required to parse container_ids" >&2
+            exit 1
+          fi
+
+          echo "::group::Patch gerrit_to_platform from" \
+            "${G2P_INSTALL_REPO}@${G2P_INSTALL_REF}"
+
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          # Shallow clone keeps the runner footprint small; the
+          # subsequent fetch handles arbitrary refs (including
+          # Gerrit change refspecs that the initial clone does not
+          # advertise).
+          echo "Cloning ${G2P_INSTALL_REPO}"
+          # '--' guards against an input that begins with '-' being
+          # interpreted as a git option (option-injection hardening).
+          git clone --depth=1 --no-tags -- \
+            "${G2P_INSTALL_REPO}" "${WORKDIR}/g2p"
+
+          echo "Fetching ref: ${G2P_INSTALL_REF}"
+          git -C "${WORKDIR}/g2p" fetch --depth=1 origin \
+            -- "${G2P_INSTALL_REF}"
+          git -C "${WORKDIR}/g2p" checkout --detach FETCH_HEAD
+
+          RESOLVED_SHA=$(git -C "${WORKDIR}/g2p" rev-parse HEAD)
+          echo "Resolved ${G2P_INSTALL_REF} -> ${RESOLVED_SHA}"
+          echo "resolved_sha=${RESOLVED_SHA}" >> "$GITHUB_OUTPUT"
+
+          # CONTAINER_IDS may be either a JSON array (gerrit-action
+          # contract) or a single id (defensive fallback).
+          if echo "${CONTAINER_IDS}" | \
+            jq -e 'type == "array"' >/dev/null 2>&1; then
+              mapfile -t CIDS < <(echo "${CONTAINER_IDS}" | jq -r '.[]')
+          else
+              CIDS=("${CONTAINER_IDS}")
+          fi
+
+          for CID in "${CIDS[@]}"; do
+            [ -z "${CID}" ] && continue
+            echo "--- Patching container ${CID} ---"
+
+            # Capture the baseline version so we can prove the
+            # override took effect.
+            BEFORE=$(docker exec --user root "${CID}" \
+              /opt/gerrit-tools/bin/python -c \
+                'import gerrit_to_platform as g; print(g.__version__)' \
+              2>/dev/null || echo 'unknown')
+            echo "  baseline gerrit_to_platform version: ${BEFORE}"
+
+            # Drop the working tree into the container and install
+            # over the existing venv.  '--no-deps' avoids touching
+            # the hash-pinned transitive dependencies.
+            docker exec --user root "${CID}" rm -rf /tmp/g2p-override
+            docker cp "${WORKDIR}/g2p" "${CID}:/tmp/g2p-override"
+
+            docker exec --user root "${CID}" \
+              /opt/gerrit-tools/bin/uv pip install \
+                --python /opt/gerrit-tools/bin/python \
+                --upgrade --force-reinstall --no-deps \
+                /tmp/g2p-override
+
+            AFTER=$(docker exec --user root "${CID}" \
+              /opt/gerrit-tools/bin/python -c \
+                'import gerrit_to_platform as g; print(g.__version__)' \
+              2>/dev/null || echo 'unknown')
+            echo "  override gerrit_to_platform version: ${AFTER}"
+
+            # Verify the console scripts still resolve after the swap.
+            docker exec --user root "${CID}" \
+              /opt/gerrit-tools/bin/change-merged --help >/dev/null
+
+            # Tidy up the staging copy inside the container.
+            docker exec --user root "${CID}" rm -rf /tmp/g2p-override
+          done
+
+          echo "::endgroup::"
+          # GitHub Actions notice annotation; long ref/SHA pulled into
+          # variables so the workflow stays inside yamllint's 80-col limit.
+          NOTICE_TITLE="g2p override"
+          NOTICE_BODY="Installed gerrit_to_platform from"
+          NOTICE_BODY="${NOTICE_BODY} ${G2P_INSTALL_REPO}@${G2P_INSTALL_REF}"
+          NOTICE_BODY="${NOTICE_BODY} (${RESOLVED_SHA}) in"
+          NOTICE_BODY="${NOTICE_BODY} ${#CIDS[@]} container(s)"
+          echo "::notice title=${NOTICE_TITLE}::${NOTICE_BODY}"
 
       - name: "Verify tunnel connectivity"
         if: inputs.remote_access != 'None'
