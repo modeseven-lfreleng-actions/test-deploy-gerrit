@@ -41,7 +41,7 @@ You can trigger the workflow manually with optional parameters:
 | `sync_project_slugs`    | GitHub orgs to reset/sync (selector, see [Selector Syntax](#selector-syntax))                                                                                          | `all`                                                                |
 | `gerrit_clone_ref`      | Build gerrit-clone from git ref (`owner/repo@branch`); omit for PyPI                                                                                                   | _(feat/project-filtering)_                                           |
 | `gerrit_action_ref`     | Use gerrit-action from git ref (`owner/repo@branch`)                                                                                                                   | `lfreleng-actions/gerrit-action@main`                                |
-| `g2p_install_ref`       | Optional git ref (branch, tag, SHA, or `refs/changes/<NN>/<num>/<ps>`) to install `gerrit_to_platform` from after the container starts; empty keeps the pinned release | _(empty)_                                                            |
+| `g2p_install_ref`       | Optional git ref (branch, tag, SHA, or `refs/changes/<NN>/<num>/<ps>`) to install `gerrit_to_platform` from after the container starts; empty keeps the pinned release | `refs/changes/74/74274/1`                                            |
 | `g2p_install_repo`      | Source HTTPS Git URL for `g2p_install_ref` (consulted when the ref input has a value)                                                                                  | `https://gerrit.linuxfoundation.org/infra/releng/gerrit_to_platform` |
 
 <!-- markdownlint-enable MD013 -->
