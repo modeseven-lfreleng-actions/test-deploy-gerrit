@@ -1099,6 +1099,240 @@ jobs:
 
           echo "Session time expired."
 
+      # ================================================================
+      # CAPTURE G2P DIAGNOSTICS BEFORE CLEANUP
+      # ================================================================
+      # The Gerrit container is the only place that holds the
+      # gerrit_to_platform hook output (stderr → error_log via the
+      # Gerrit hooks plugin) and the gerrit-action wrapper's
+      # per-event tee log (g2p-hooks.log).  Both vanish the moment
+      # we kill the container, so collect them here while it is
+      # still running, then attach them to the workflow run as a
+      # downloadable artefact.  The step (and its companion upload)
+      # is gated on inputs.configure_g2p == true, so opt-out runs
+      # skip both steps entirely — no artefact is produced and no
+      # warning is emitted.
+      - name: "Capture g2p diagnostics"
+        id: capture-g2p
+        if: >-
+          always() &&
+          inputs.configure_g2p == true &&
+          steps.gerrit.outputs.container_ids != ''
+        shell: bash
+        env:
+          CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
+          SERVER_SLUG: ${{ matrix.server.slug }}
+        run: |
+          set +e  # never let diagnostic capture mask the real result
+          mkdir -p g2p-diagnostics
+
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq missing; skipping diagnostics capture" >&2
+            exit 0
+          fi
+
+          if echo "${CONTAINER_IDS}" | \
+            jq -e 'type == "array"' >/dev/null 2>&1; then
+              mapfile -t CIDS < <(echo "${CONTAINER_IDS}" | jq -r '.[]')
+          else
+              CIDS=("${CONTAINER_IDS}")
+          fi
+
+          for CID in "${CIDS[@]}"; do
+            [ -z "${CID}" ] && continue
+            SHORT="${CID:0:12}"
+            DEST="g2p-diagnostics/${SERVER_SLUG}-${SHORT}"
+            mkdir -p "${DEST}"
+            echo "Collecting diagnostics from ${CID} -> ${DEST}"
+
+            # Installed package version (proves whether the
+            # override took effect: 0+gerrit.<sha> vs 0.3.1).
+            docker exec --user root "${CID}" \
+              /opt/gerrit-tools/bin/python -c \
+              'import gerrit_to_platform as g; print(g.__version__)' \
+              > "${DEST}/g2p-version.txt" 2>&1
+
+            # The wrapper's per-hook tee (entry, argv, exit code,
+            # raw stdout/stderr).
+            docker cp "${CID}:/var/gerrit/logs/g2p-hooks.log" \
+              "${DEST}/g2p-hooks.log" 2>/dev/null
+
+            # Gerrit's main error_log carries the structured trace
+            # the new logging framework writes to stderr.
+            docker cp "${CID}:/var/gerrit/logs/error_log" \
+              "${DEST}/error_log" 2>/dev/null
+
+            # SSHD log (helps diagnose hook-trigger paths involving
+            # SSH replication or pull-replication).
+            docker cp "${CID}:/var/gerrit/logs/sshd_log" \
+              "${DEST}/sshd_log" 2>/dev/null
+
+            # Replication log captures the replication plugin's
+            # view of the same merge events.
+            docker cp "${CID}:/var/gerrit/logs/replication_log" \
+              "${DEST}/replication_log" 2>/dev/null
+
+            # Snapshot the g2p config (token already redacted by
+            # the wrapper before it was written; double-check via
+            # the framework's RedactingFilter on read-back if any
+            # secrets still appear here).
+            REDACT='s/(token[[:space:]]*=[[:space:]]*).+/\1***REDACTED***/I'
+            docker exec --user root \
+              -e "REDACT=${REDACT}" "${CID}" sh -c '
+              for f in \
+                /var/gerrit/.config/gerrit_to_platform/gerrit_to_platform.ini \
+                /var/gerrit/.config/gerrit_to_platform/replication.config; do
+                if [ -r "$f" ]; then
+                  echo "=== $f ==="
+                  sed -E "$REDACT" "$f"
+                  echo
+                fi
+              done' > "${DEST}/g2p-config.txt" 2>&1
+
+            # Hook scripts present (proves the wrapper is in place).
+            docker exec --user root "${CID}" \
+              ls -la /var/gerrit/hooks/ \
+              > "${DEST}/hooks-listing.txt" 2>&1
+
+            # Last 500 lines of the container's own stdout/stderr
+            # (for early-boot Gerrit-side issues).
+            docker logs --tail 500 "${CID}" \
+              > "${DEST}/docker-logs.txt" 2>&1
+          done
+
+          # Count diagnostic files collected from containers (the
+          # per-container subdirectories live under g2p-diagnostics/
+          # so -mindepth 2 skips any future top-level helper files).
+          COLLECTED=$(find g2p-diagnostics -mindepth 2 -type f 2>/dev/null \
+            | wc -l | tr -d ' ')
+          echo "diagnostic files collected: ${COLLECTED}"
+
+          if [ "${COLLECTED}" -eq 0 ]; then
+            echo "::warning title=g2p diagnostics::no files collected"
+            # Reset the staging directory and signal failure to the
+            # upload step via files_collected=false.  The upload
+            # step is gated on that output, so it skips entirely
+            # rather than relying on upload-artifact's
+            # 'if-no-files-found: warn' guard (which would never
+            # fire here because the step never runs).
+            rm -rf g2p-diagnostics
+            mkdir -p g2p-diagnostics
+            echo "files_collected=false" >> "$GITHUB_OUTPUT"
+            echo "redaction_ok=skipped"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ----------------------------------------------------------
+          # POST-CAPTURE SECRET REDACTION
+          # ----------------------------------------------------------
+          # Workflow logs are auto-masked by GitHub; artefact files
+          # are NOT.  The gerrit_to_platform RedactingFilter only
+          # scrubs records the framework itself writes — the
+          # wrapper's g2p-hooks.log, the container's docker-logs and
+          # any stderr emitted before the framework loaded all reach
+          # us untouched.  Apply the same patterns here as a defence
+          # in depth before the upload step publishes the directory.
+          #
+          # Patterns kept in lock-step with
+          # gerrit_to_platform/_logging.py::RedactingFilter:
+          #   * gh[posr]_<20+ alnum>   GitHub token shapes
+          #   * Authorization: Bearer|token <value>
+          #   * ?token=, ?access_token=, ?api_key= query strings
+          #   * token=/secret=/password= labelled values
+          #
+          # Failure-atomic: any non-zero status from sed or xargs
+          # nukes g2p-diagnostics/ and the upload step is skipped.
+          # We never publish unredacted content.
+          echo "Applying secret-redaction pass to captured artefacts"
+          # Patterns kept short and stored in variables so the sed
+          # invocation stays under yamllint's 80-col limit.
+          PAT_GHTOKEN='s/gh[posr]_[A-Za-z0-9]{20,}/***REDACTED***/g'
+          PAT_AUTH_HDR='s/(Authorization[[:space:]]*[:=]'
+          PAT_AUTH_HDR="${PAT_AUTH_HDR}"'[[:space:]]*)(Bearer|token)'
+          PAT_AUTH_HDR="${PAT_AUTH_HDR}"'[[:space:]]+[^[:space:]]+'
+          PAT_AUTH_HDR="${PAT_AUTH_HDR}"'/\1\2 ***REDACTED***/Ig'
+          PAT_QS='s/([?&](token|access_token|api_key)='
+          PAT_QS="${PAT_QS}"')[^&[:space:]"]+/\1***REDACTED***/Ig'
+          PAT_LBL='s/((token|secret|password)[[:space:]]*[:=]'
+          PAT_LBL="${PAT_LBL}"'[[:space:]]*)["'\'']?[A-Za-z0-9_\-]{16,}'
+          PAT_LBL="${PAT_LBL}"'["'\'']?/\1***REDACTED***/Ig'
+          # The redaction pipeline runs inside a subshell with
+          # 'set -eo pipefail' so that a non-zero status from
+          # 'find', 'xargs' or 'sed' — anywhere in the pipe —
+          # surfaces as the subshell's own exit code.  We then
+          # capture that code into REDACT_RC and branch on it
+          # explicitly (the outer step deliberately runs under
+          # 'set +e' so other diagnostic commands cannot mask the
+          # workflow result; the subshell + explicit-check pattern
+          # is what makes the redaction failure-atomic).
+          (
+            set -eo pipefail
+            # 'find ... -print0 | xargs -0' is portable and handles
+            # any unusual filenames safely.
+            find g2p-diagnostics -type f \
+              \( -name '*.log' -o -name '*.txt' -o -name 'error_log' \
+                 -o -name 'sshd_log' -o -name 'replication_log' \) \
+              -print0 \
+            | xargs -0 -r sed -i -E \
+                -e "${PAT_GHTOKEN}" \
+                -e "${PAT_AUTH_HDR}" \
+                -e "${PAT_QS}" \
+                -e "${PAT_LBL}"
+          )
+          REDACT_RC=$?
+          if [ "${REDACT_RC}" -ne 0 ]; then
+            echo "::error title=g2p diagnostics::redaction pass failed" \
+              "(exit ${REDACT_RC}); discarding diagnostics to avoid" \
+              "publishing unredacted secrets"
+            rm -rf g2p-diagnostics
+            mkdir -p g2p-diagnostics
+            echo "files_collected=false" >> "$GITHUB_OUTPUT"
+            echo "redaction_ok=false"    >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Summary file at the artefact root — written ONLY after a
+          # successful redaction so the upload step's
+          # 'if-no-files-found' guard remains meaningful.
+          {
+            echo "# g2p diagnostics summary"
+            echo "server_slug: ${SERVER_SLUG}"
+            echo "captured_at: $(date -u +%FT%TZ)"
+            echo "container_ids: ${CONTAINER_IDS}"
+            echo "files_collected: ${COLLECTED}"
+            echo "redaction_pass: ok"
+            echo
+            echo "Per-container files:"
+            find g2p-diagnostics -mindepth 2 -type f | sort
+          } > g2p-diagnostics/SUMMARY.txt
+
+          echo "files_collected=true"  >> "$GITHUB_OUTPUT"
+          echo "redaction_ok=true"     >> "$GITHUB_OUTPUT"
+          echo "Diagnostics capture complete."
+          ls -la g2p-diagnostics/
+
+      - name: "Upload g2p diagnostics"
+        # Gate on the capture step's positive signal so the upload
+        # never runs when redaction failed (or no files were
+        # collected).  The 'if-no-files-found: warn' guard then only
+        # fires for the genuine "capture succeeded but produced
+        # zero files" race rather than every opt-out run.
+        if: >-
+          always() &&
+          inputs.configure_g2p == true &&
+          steps.gerrit.outputs.container_ids != '' &&
+          steps.capture-g2p.outputs.files_collected == 'true' &&
+          steps.capture-g2p.outputs.redaction_ok == 'true'
+        # actions/upload-artifact v7.0.1 (commit pin per project policy)
+        # No additional 'permissions:' scope required: v4+ uploads use
+        # ACTIONS_RUNTIME_TOKEN, which is independent of GITHUB_TOKEN.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: g2p-diagnostics-${{ matrix.server.slug }}
+          path: g2p-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: "Cleanup"
         if: always()
         env:
