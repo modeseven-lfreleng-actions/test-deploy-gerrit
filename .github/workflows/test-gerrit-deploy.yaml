@@ -25,6 +25,23 @@ on:
         options:
           - "true"
           - "false"
+      skip_archived_projects:
+        # Restricts the project list fetched from the source Gerrit to
+        # state=ACTIVE projects.  Archived (READ_ONLY) and hidden
+        # projects are excluded server-side via the REST query, so
+        # pull-replication never pre-creates local directories for
+        # them and the initial sync skips that traffic entirely.
+        # Roughly halves cold-start replication time on instances with
+        # large historical archives (ONAP: 181 active + 214 read_only
+        # = 395 total).  Disable when a specific archived repository
+        # needs to be mirrored — e.g. for backfill or one-off
+        # debugging against an archived project.
+        description: >-
+          Skip archived (read-only) Gerrit projects during initial
+          sync (faster startup; set false to include them)
+        required: false
+        default: true
+        type: boolean
       persist_project_slugs:
         # Supports: 'none', 'all', single value, comma/space-separated,
         # wildcards (*,?). Use 'none' to disable persistent sessions.
@@ -719,6 +736,8 @@ jobs:
           ssh_auth_keys: ${{ vars.GERRIT_PUBLIC_KEYS }}
           ssh_auth_username: 'modesevenindustrialsolutions'
           sync_on_startup: ${{ inputs.sync_on_startup }}
+          skip_archived_projects: >-
+            ${{ inputs.skip_archived_projects == true && 'true' || 'false' }}
           use_api_path: ${{ inputs.match_api_path }}
           debug: ${{ needs.validate.outputs.effective_debug }}
           check_service: true
