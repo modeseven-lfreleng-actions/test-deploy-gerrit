@@ -47,14 +47,33 @@ on:
           - "true"
           - "false"
       remote_access:
-        # Makes Gerrit instance accessible from outside GitHub
+        # Makes Gerrit instance accessible from outside GitHub via one
+        # of three tunnelling backends:
+        #   * 'None'                  - no remote access (Tailscale-
+        #                               free, bore-free run).
+        #   * 'Bore (bore.pub)'       - public bore relay run by
+        #                               ekzhang.  Flaky in practice;
+        #                               blocked by many corporate
+        #                               DNS filters as a tunnel
+        #                               service.
+        #   * 'Bore (modeseven.org)'  - private bore broker running
+        #                               on AWS at modeseven.org
+        #                               (control port 7835, port
+        #                               range 40000-40100).  Uses
+        #                               the BORE_MODESEVEN_ORG repo
+        #                               secret for shared-secret
+        #                               authentication.
+        #   * 'Tailscale'             - tailnet-based access using
+        #                               TS_OAUTH_CLIENT_ID /
+        #                               TS_OAUTH_SECRET.
         description: "Enable remote Gerrit access"
         required: false
         default: "Tailscale"
         type: choice
         options:
           - "None"
-          - "Bore"
+          - "Bore (bore.pub)"
+          - "Bore (modeseven.org)"
           - "Tailscale"
       reset_orgs:
         description: "Reset (delete all repos from) GitHub ORGs"
@@ -444,7 +463,7 @@ jobs:
           echo "  SSH:  $SSH_PORT"
 
       - name: "Install bore"
-        if: inputs.remote_access == 'Bore'
+        if: startsWith(inputs.remote_access, 'Bore')
         run: |
           # Install bore TCP tunnel client
           BORE_VERSION="0.5.2"
@@ -460,21 +479,64 @@ jobs:
 
       - name: "Start bore tunnels"
         id: tunnels
-        if: inputs.remote_access == 'Bore'
+        if: startsWith(inputs.remote_access, 'Bore')
         env:
           LOCAL_HTTP: ${{ steps.ports.outputs.http_port }}
           LOCAL_SSH: ${{ steps.ports.outputs.ssh_port }}
           SERVER_SLUG: ${{ matrix.server.slug }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
+          BORE_MODESEVEN_ORG: ${{ secrets.BORE_MODESEVEN_ORG }}
         run: |
-          # Start bore tunnels BEFORE Gerrit container
-          echo "Starting bore tunnels to bore.pub..."
+          # Resolve which bore broker to talk to and (when required)
+          # the shared secret to authenticate with.  bore.pub is the
+          # public relay; modeseven.org is the private AWS instance
+          # with a fixed allocation port-range (40000-40100) and
+          # shared-secret auth via the BORE_MODESEVEN_ORG repo secret.
+          BORE_SECRET=""
+          case "$REMOTE_ACCESS" in
+            "Bore (bore.pub)")
+              BORE_HOST="bore.pub"
+              ;;
+            "Bore (modeseven.org)")
+              BORE_HOST="modeseven.org"
+              BORE_SECRET="$BORE_MODESEVEN_ORG"
+              if [ -z "$BORE_SECRET" ]; then
+                echo "::error::BORE_MODESEVEN_ORG repo secret is not" \
+                  "set; cannot authenticate against the private bore" \
+                  "broker at modeseven.org"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Unrecognised Bore variant:" \
+                "'$REMOTE_ACCESS'"
+              exit 1
+              ;;
+          esac
 
+          # Regex-escape '.' in the host name for the log-line grep
+          # later (the only regex metacharacter present in either
+          # broker name).
+          BORE_HOST_RE=$(printf '%s' "$BORE_HOST" | sed 's/[.]/\\./g')
+
+          # Bore client invocations: pass --secret only when set so
+          # the public bore.pub path stays argv-identical to before.
+          BORE_ARGS=(--to "$BORE_HOST")
+          if [ -n "$BORE_SECRET" ]; then
+            BORE_ARGS+=(--secret "$BORE_SECRET")
+          fi
+
+          echo "Starting bore tunnels to ${BORE_HOST}..."
+
+          # Start bore tunnels BEFORE Gerrit container
           # Start HTTP tunnel
-          bore local "$LOCAL_HTTP" --to bore.pub > bore-http.log 2>&1 &
+          bore local "$LOCAL_HTTP" "${BORE_ARGS[@]}" \
+            > bore-http.log 2>&1 &
           HTTP_PID=$!
 
           # Start SSH tunnel
-          bore local "$LOCAL_SSH" --to bore.pub > bore-ssh.log 2>&1 &
+          bore local "$LOCAL_SSH" "${BORE_ARGS[@]}" \
+            > bore-ssh.log 2>&1 &
           SSH_PID=$!
 
           {
@@ -503,9 +565,11 @@ jobs:
               SSH_RUNNING=false
             fi
 
-            HTTP_PORT=$(grep -oP 'listening at bore\.pub:\K\d+' \
+            HTTP_PORT=$(grep -oP \
+              "listening at ${BORE_HOST_RE}:\K\d+" \
               bore-http.log 2>/dev/null || echo "")
-            SSH_PORT=$(grep -oP 'listening at bore\.pub:\K\d+' \
+            SSH_PORT=$(grep -oP \
+              "listening at ${BORE_HOST_RE}:\K\d+" \
               bore-ssh.log 2>/dev/null || echo "")
 
             if [ -n "$HTTP_PORT" ] && [ -n "$SSH_PORT" ]; then
@@ -526,9 +590,11 @@ jobs:
           done
 
           # Final port extraction
-          HTTP_PORT=$(grep -oP 'listening at bore\.pub:\K\d+' \
+          HTTP_PORT=$(grep -oP \
+            "listening at ${BORE_HOST_RE}:\K\d+" \
             bore-http.log 2>/dev/null || echo "")
-          SSH_PORT=$(grep -oP 'listening at bore\.pub:\K\d+' \
+          SSH_PORT=$(grep -oP \
+            "listening at ${BORE_HOST_RE}:\K\d+" \
             bore-ssh.log 2>/dev/null || echo "")
 
           if [ -n "$HTTP_PORT" ] && [ -n "$SSH_PORT" ]; then
@@ -541,15 +607,15 @@ jobs:
 
             {
               echo "tunnels_ok=true"
-              echo "bore_host=bore.pub"
+              echo "bore_host=$BORE_HOST"
               echo "http_port=$HTTP_PORT"
               echo "ssh_port=$SSH_PORT"
               echo "tunnel_ports=$TUNNEL_PORTS"
             } >> "$GITHUB_OUTPUT"
 
             echo "Bore tunnels established successfully ✅"
-            echo "  HTTP: bore.pub:$HTTP_PORT -> localhost:$LOCAL_HTTP"
-            echo "  SSH:  bore.pub:$SSH_PORT -> localhost:$LOCAL_SSH"
+            echo "  HTTP: ${BORE_HOST}:$HTTP_PORT -> localhost:$LOCAL_HTTP"
+            echo "  SSH:  ${BORE_HOST}:$SSH_PORT -> localhost:$LOCAL_SSH"
           else
             HTTP_ERR=$(head -1 bore-http.log 2>/dev/null || echo "unknown")
             SSH_ERR=$(head -1 bore-ssh.log 2>/dev/null || echo "unknown")
@@ -573,7 +639,7 @@ jobs:
                 [ -z "$SSH_PORT" ] && echo "- **SSH:** $SSH_ERR"
               fi
               echo ""
-              echo "bore.pub may be down, or port 7835 is blocked."
+              echo "${BORE_HOST} may be down, or port 7835 is blocked."
             } >> "$GITHUB_STEP_SUMMARY"
 
             echo "::error::Bore tunnel setup failed. Check job summary."
@@ -659,14 +725,15 @@ jobs:
           exit: false
           tunnel_host: >-
             ${{
-              inputs.remote_access == 'Bore' && 'bore.pub' ||
+              startsWith(inputs.remote_access, 'Bore') &&
+                steps.tunnels.outputs.bore_host ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.tailscale_ip ||
               ''
             }}
           tunnel_ports: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.tunnel_ports ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.tunnel_ports ||
@@ -838,7 +905,7 @@ jobs:
         env:
           TUNNEL_HOST: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.bore_host ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.tailscale_ip ||
@@ -846,7 +913,7 @@ jobs:
             }}
           HTTP_PORT: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.http_port ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.http_port ||
@@ -894,7 +961,7 @@ jobs:
           REMOTE_ACCESS: ${{ inputs.remote_access }}
           TUNNEL_HOST: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.bore_host ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.tailscale_ip ||
@@ -902,7 +969,7 @@ jobs:
             }}
           TUNNEL_HTTP_PORT: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.http_port ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.http_port ||
@@ -910,7 +977,7 @@ jobs:
             }}
           TUNNEL_SSH_PORT: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.ssh_port ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.ssh_port ||
@@ -918,7 +985,7 @@ jobs:
             }}
           TUNNEL_LOCAL_HTTP: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.local_http_port ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.local_http_port ||
@@ -926,7 +993,7 @@ jobs:
             }}
           TUNNEL_LOCAL_SSH: >-
             ${{
-              inputs.remote_access == 'Bore' &&
+              startsWith(inputs.remote_access, 'Bore') &&
                 steps.tunnels.outputs.local_ssh_port ||
               inputs.remote_access == 'Tailscale' &&
                 steps.tailscale-tunnel.outputs.local_ssh_port ||
