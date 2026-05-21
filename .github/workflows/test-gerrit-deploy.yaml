@@ -214,6 +214,36 @@ on:
         required: false
         default: false
         type: boolean
+      replicate_open_changes:
+        # Pull NoteDb meta refs from the source Gerrit so the
+        # deployed test instance renders OPEN CHANGES (votes,
+        # comments, status), per-account identities and group
+        # memberships in the UI and REST search.  Off by default
+        # because it materially increases initial sync size on
+        # instances with large review histories (and brings the
+        # source's change-number sequence into the test instance,
+        # which can collide if anything writes new changes here).
+        #
+        # When 'true' the workflow passes BOTH
+        # 'replicate_meta_refs' (adds refspecs for refs/meta/*,
+        # refs/cache-automerge/*, plus a second remote that pulls
+        # refs/users/*, refs/groups/*, refs/sequences/*,
+        # refs/meta/*, refs/draft-comments/*,
+        # refs/starred-changes/* into All-Users and All-Projects)
+        # AND 'reindex_after_sync'
+        # (runs an online reindex + targeted cache flush inside
+        # every container once pull-replication has settled, so
+        # the secondary Lucene index actually reflects the
+        # replicated NoteDb state) through to gerrit-action.
+        #
+        # Treat the resulting Gerrit as read-only: any new change
+        # uploaded against the test instance risks colliding with
+        # the source server's change-number sequence on the next
+        # pull-replication cycle.
+        description: "Replicate open changes (NoteDb meta refs + reindex)"
+        required: false
+        default: false
+        type: boolean
       g2p_org_setup:
         description: "G2P org setup mode"
         required: false
@@ -816,6 +846,10 @@ jobs:
           sync_on_startup: ${{ inputs.sync_on_startup }}
           skip_archived_projects: >-
             ${{ inputs.skip_archived_projects == true && 'true' || 'false' }}
+          replicate_meta_refs: >-
+            ${{ inputs.replicate_open_changes == true && 'true' || 'false' }}
+          reindex_after_sync: >-
+            ${{ inputs.replicate_open_changes == true && 'true' || 'false' }}
           use_api_path: ${{ inputs.match_api_path }}
           debug: ${{ needs.validate.outputs.effective_debug }}
           check_service: true
