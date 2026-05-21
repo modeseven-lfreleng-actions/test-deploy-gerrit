@@ -135,6 +135,85 @@ on:
         required: false
         default: true
         type: boolean
+      rewrite_gitreview:
+        # Rewrites .gitreview inside every replicated/cloned project
+        # so that contributors who 'git clone' from this short-lived
+        # test Gerrit get a .gitreview pointing at the test instance
+        # rather than the upstream production Gerrit it mirrors.
+        #
+        # Modes:
+        #   * 'Leave unchanged'        - skip the rewrite entirely.
+        #                                Useful for debugging
+        #                                replication or comparing
+        #                                source state against
+        #                                upstream where touching
+        #                                .gitreview would muddy the
+        #                                diff.
+        #   * 'Change with new commit' - append a synthetic 'Chore:
+        #                                Rewrite .gitreview for test
+        #                                deployment' commit on top
+        #                                of each branch tip.  The
+        #                                rewrite shows up in 'git
+        #                                log' as its own commit.
+        #   * 'Change by amended commit'
+        #                              - rebuild the existing tip
+        #                                commit in place, preserving
+        #                                its author, committer,
+        #                                date, message and parents,
+        #                                swapping only the tree.  No
+        #                                extra commit appears in the
+        #                                log; the .gitreview blob
+        #                                simply differs from upstream
+        #                                inside the tip commit.
+        #
+        # The target host/port depend on 'remote_access':
+        #   * Bore tunnels   - host=tunnel host, port=tunnel SSH port
+        #   * Tailscale      - host=tag:ci node IP, port left alone
+        #   * None           - host=runner public IPv4, port=local
+        #                      SSH port (deterministic per matrix
+        #                      index).  In 'None' mode nothing
+        #                      outside the runner can actually reach
+        #                      the Gerrit; the rewrite is still
+        #                      performed for consistency and for
+        #                      diagnostic snapshots.
+        description: "Update .gitreview host and port"
+        required: false
+        default: "Change by amended commit"
+        type: choice
+        options:
+          - "Leave unchanged"
+          - "Change with new commit"
+          - "Change by amended commit"
+      create_missing_gitreview:
+        # Creates a .gitreview file in every replicated/cloned
+        # project whose branch tip is missing one.  Only the
+        # 'host' and 'port' values are sourced from an existing
+        # .gitreview found on another repo's default-branch (HEAD)
+        # tip (the first match wins; non-default branches are not
+        # scanned) so the new files point at the same Gerrit as
+        # the rest of the estate; any other keys, comments or
+        # whitespace in that source file are NOT reproduced.  The
+        # generated .gitreview is a minimal fixed-key file with
+        # exactly:
+        #
+        #     [gerrit]
+        #     host=<from estate>
+        #     port=<from estate, default 29418>
+        #     project=<bare repo path, '.git' stripped>
+        #     defaultbranch=<branch name from HEAD, 'refs/heads/' stripped>
+        #
+        # When 'rewrite_gitreview' also requests a rewrite, the
+        # rewrite step runs afterwards and re-targets the newly
+        # created files at the test deployment in the same pass.
+        # The creation step honours the same commit strategy
+        # chosen for 'rewrite_gitreview': it amends the existing
+        # tip commit in place under 'Change by amended commit' and
+        # appends a synthetic 'Chore: Add missing .gitreview'
+        # commit otherwise.
+        description: "Create .gitreview file where missing"
+        required: false
+        default: false
+        type: boolean
       g2p_org_setup:
         description: "G2P org setup mode"
         required: false
@@ -451,7 +530,6 @@ jobs:
 
       - name: "Calculate local ports"
         id: ports
-        if: inputs.remote_access != 'None'
         env:
           SERVER_SLUG: ${{ matrix.server.slug }}
           DEBUG_MATRIX: ${{ needs.prepare.outputs.debug_matrix }}
@@ -975,6 +1053,231 @@ jobs:
           echo "::warning::Could not verify tunnel connectivity"
           echo "Gerrit may still be starting up"
 
+      - name: "Stage gitreview_tool.py inside Gerrit containers"
+        # Ship the Python helper that consolidates all .gitreview
+        # create/rewrite logic (see scripts/gitreview_tool.py).  The
+        # tool runs inside each Gerrit container as the 'gerrit'
+        # user so any new git objects/refs land with the correct
+        # ownership and replication/GC keeps working.
+        if: >-
+          inputs.create_missing_gitreview == true ||
+          inputs.rewrite_gitreview != 'Leave unchanged'
+        env:
+          CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
+        shell: bash
+        run: |
+          # Copy the tool into every Gerrit container under /tmp/.
+          set -eu
+          if [ -z "${CONTAINER_IDS}" ]; then
+            echo "::warning::Empty container_ids from gerrit step" \
+              "(no containers running);" \
+              "skipping gitreview tool staging"
+            exit 0
+          fi
+          # jq is a hard dependency of CONTAINER_IDS parsing in
+          # this step and the two that follow.  Fail loudly here
+          # so a missing jq surfaces in a single place rather
+          # than producing inconsistent behaviour downstream.
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required to parse container_ids"
+            exit 1
+          fi
+          if echo "${CONTAINER_IDS}" | \
+            jq -e 'type == "array"' >/dev/null 2>&1; then
+              mapfile -t CIDS < <(echo "${CONTAINER_IDS}" | jq -r '.[]')
+          else
+              CIDS=("${CONTAINER_IDS}")
+          fi
+          for CID in "${CIDS[@]}"; do
+            [ -z "${CID}" ] && continue
+            SHORT="${CID:0:12}"
+            echo "--- staging gitreview_tool.py inside ${SHORT} ---"
+            docker cp scripts/gitreview_tool.py \
+              "${CID}:/tmp/gitreview_tool.py"
+            # 'docker cp' lands the file as root:root.  Chown to
+            # gerrit so the follow-up 'docker exec --user gerrit'
+            # can read it without re-invoking root.
+            docker exec --user root "${CID}" \
+              chown gerrit:gerrit /tmp/gitreview_tool.py
+          done
+
+      - name: "Create missing .gitreview files"
+        # Synthesise .gitreview on every default-branch tip that
+        # lacks one, sourcing host/port from the first usable
+        # .gitreview elsewhere in the estate.  Honours the same
+        # commit strategy as 'rewrite_gitreview' so 'create +
+        # amend + rewrite' together leave no synthetic 'Chore'
+        # commit in the resulting branch history.  Full
+        # implementation lives in scripts/gitreview_tool.py.
+        if: inputs.create_missing_gitreview == true
+        env:
+          CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
+          REWRITE_MODE: ${{ inputs.rewrite_gitreview }}
+        shell: bash
+        run: |
+          # Invoke gitreview_tool.py create-missing in every container.
+          set -eu
+          if [ -z "${CONTAINER_IDS}" ]; then
+            echo "::warning::Empty container_ids from gerrit step" \
+              "(no containers running);" \
+              "skipping .gitreview create"
+            exit 0
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required to parse container_ids"
+            exit 1
+          fi
+          STRATEGY=new
+          if [ "${REWRITE_MODE}" = "Change by amended commit" ]; then
+            STRATEGY=amend
+          fi
+          if echo "${CONTAINER_IDS}" | \
+            jq -e 'type == "array"' >/dev/null 2>&1; then
+              mapfile -t CIDS < <(echo "${CONTAINER_IDS}" | jq -r '.[]')
+          else
+              CIDS=("${CONTAINER_IDS}")
+          fi
+          for CID in "${CIDS[@]}"; do
+            [ -z "${CID}" ] && continue
+            SHORT="${CID:0:12}"
+            echo "--- creating missing .gitreview inside ${SHORT} ---"
+            docker exec --user gerrit "${CID}" \
+              python3 /tmp/gitreview_tool.py create-missing \
+                --strategy "${STRATEGY}"
+          done
+
+      - name: "Update .gitreview across replicated repos"
+        # Rewrite .gitreview in every replicated project so clones
+        # from the test Gerrit target the test instance rather
+        # than the upstream production Gerrit it mirrors.  For
+        # 'None' (no VPN) the runner's public IPv4 is used (resolved
+        # via 'curl -4' against external echo services so no RFC1918
+        # interface address can ever leak into .gitreview).
+        # Tailscale leaves the port line alone (the tunnel exposes
+        # the container's native SSH port directly).  Full
+        # implementation lives in scripts/gitreview_tool.py.
+        #
+        # Two commit strategies via 'rewrite_gitreview':
+        #   * 'Change with new commit'   - append a synthetic
+        #                                  'Chore: Rewrite
+        #                                  .gitreview' commit on
+        #                                  top of each tip.
+        #   * 'Change by amended commit' - rebuild the existing
+        #                                  tip in place; nothing
+        #                                  about the rewrite
+        #                                  appears in 'git log'.
+        if: inputs.rewrite_gitreview != 'Leave unchanged'
+        env:
+          CONTAINER_IDS: ${{ steps.gerrit.outputs.container_ids }}
+          REMOTE_ACCESS: ${{ inputs.remote_access }}
+          REWRITE_MODE: ${{ inputs.rewrite_gitreview }}
+          TUNNEL_HOST: >-
+            ${{
+              startsWith(inputs.remote_access, 'Bore') &&
+                steps.tunnels.outputs.bore_host ||
+              inputs.remote_access == 'Tailscale' &&
+                steps.tailscale-tunnel.outputs.tailscale_ip ||
+              ''
+            }}
+          TUNNEL_SSH_PORT: >-
+            ${{
+              startsWith(inputs.remote_access, 'Bore') &&
+                steps.tunnels.outputs.ssh_port ||
+              ''
+            }}
+          LOCAL_SSH_PORT: ${{ steps.ports.outputs.ssh_port }}
+        shell: bash
+        run: |
+          # Resolve target host/port, then invoke gitreview_tool.py
+          # rewrite in every container.
+          set -eu
+
+          if [ -z "${CONTAINER_IDS}" ]; then
+            echo "::warning::Empty container_ids from gerrit step" \
+              "(no containers running);" \
+              "skipping .gitreview rewrite"
+            exit 0
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required to parse container_ids"
+            exit 1
+          fi
+
+          NEW_HOST=""
+          NEW_PORT=""
+          KEEP_PORT_FLAG=""
+          case "${REMOTE_ACCESS}" in
+            "Bore "*)
+              NEW_HOST="${TUNNEL_HOST}"
+              NEW_PORT="${TUNNEL_SSH_PORT}"
+              ;;
+            "Tailscale")
+              NEW_HOST="${TUNNEL_HOST}"
+              KEEP_PORT_FLAG="--keep-port"
+              ;;
+            "None")
+              # Force IPv4 via 'curl -4' so dual-stack runners
+              # cannot return an IPv6 literal.  No local-interface
+              # fallback: 'ip route get' would return a RFC1918
+              # address behind GitHub's NAT and silently break
+              # 'git review' for any external client.  When both
+              # external probes fail the empty-host guard below
+              # skips the step with a clear warning.
+              NEW_HOST="$(curl -4 -fsS --max-time 5 \
+                https://api.ipify.org 2>/dev/null || true)"
+              if [ -z "${NEW_HOST}" ]; then
+                NEW_HOST="$(curl -4 -fsS --max-time 5 \
+                  https://ifconfig.me 2>/dev/null || true)"
+              fi
+              NEW_PORT="${LOCAL_SSH_PORT}"
+              ;;
+          esac
+
+          if [ -z "${NEW_HOST}" ]; then
+            echo "::warning::Empty target host" \
+              "(remote_access=${REMOTE_ACCESS});" \
+              "skipping .gitreview rewrite"
+            exit 0
+          fi
+          if [ -z "${KEEP_PORT_FLAG}" ] && [ -z "${NEW_PORT}" ]; then
+            echo "::warning::Empty target SSH port under" \
+              "remote_access=${REMOTE_ACCESS}" \
+              "(tunnel may not be established);" \
+              "skipping .gitreview rewrite"
+            exit 0
+          fi
+          echo "target host=${NEW_HOST}" \
+            "port=${NEW_PORT:-<unchanged>}"
+
+          STRATEGY=new
+          if [ "${REWRITE_MODE}" = "Change by amended commit" ]; then
+            STRATEGY=amend
+          fi
+
+          if echo "${CONTAINER_IDS}" | \
+            jq -e 'type == "array"' >/dev/null 2>&1; then
+              mapfile -t CIDS < <(echo "${CONTAINER_IDS}" | jq -r '.[]')
+          else
+              CIDS=("${CONTAINER_IDS}")
+          fi
+
+          # Assemble tool argv.  '--keep-port' and '--port' are
+          # mutually exclusive on the tool side.
+          ARGS=(rewrite --host "${NEW_HOST}" --strategy "${STRATEGY}")
+          if [ -n "${KEEP_PORT_FLAG}" ]; then
+            ARGS+=("${KEEP_PORT_FLAG}")
+          else
+            ARGS+=(--port "${NEW_PORT}")
+          fi
+
+          for CID in "${CIDS[@]}"; do
+            [ -z "${CID}" ] && continue
+            SHORT="${CID:0:12}"
+            echo "--- rewriting .gitreview inside ${SHORT} ---"
+            docker exec --user gerrit "${CID}" \
+              python3 /tmp/gitreview_tool.py "${ARGS[@]}"
+          done
+
       - name: "Display connection info"
         env:
           REMOTE_ACCESS: ${{ inputs.remote_access }}
@@ -1027,6 +1330,8 @@ jobs:
           G2P_GITHUB_OWNER: ${{ steps.gerrit.outputs.g2p_github_owner }}
           G2P_HOOKS_ENABLED: ${{ steps.gerrit.outputs.g2p_hooks_enabled }}
           G2P_TOKEN_PROVIDED: ${{ steps.gerrit.outputs.g2p_token_provided }}
+          LOCAL_HTTP_PORT: ${{ steps.ports.outputs.http_port }}
+          LOCAL_SSH_PORT: ${{ steps.ports.outputs.ssh_port }}
         run: |
           # Display connection information
           if [ "$REMOTE_ACCESS" != "None" ] && [ -n "$TUNNEL_HOST" ]; then
@@ -1036,11 +1341,18 @@ jobs:
             LOCAL_HTTP="$TUNNEL_LOCAL_HTTP"
             LOCAL_SSH="$TUNNEL_LOCAL_SSH"
           else
+            # 'None' mode: use the deterministic local ports
+            # assigned to this matrix entry by the 'Calculate
+            # local ports' step (BASE + index).  Falling back to
+            # the hard-coded BASE values would diverge from what
+            # Gerrit actually bound for matrix entries beyond
+            # index 0 and would not match the port written into
+            # .gitreview by the rewrite step.
             REMOTE_HOST="localhost"
-            HTTP_PORT="8080"
-            SSH_PORT="29418"
-            LOCAL_HTTP="8080"
-            LOCAL_SSH="29418"
+            HTTP_PORT="${LOCAL_HTTP_PORT:-8080}"
+            SSH_PORT="${LOCAL_SSH_PORT:-29418}"
+            LOCAL_HTTP="${LOCAL_HTTP_PORT:-8080}"
+            LOCAL_SSH="${LOCAL_SSH_PORT:-29418}"
           fi
 
           declare -a TUNNELS=()
