@@ -258,27 +258,36 @@ on:
         # the running Gerrit container from a Git ref (branch, tag,
         # commit SHA, or Gerrit change ref such as
         # 'refs/changes/75/74275/2').  When empty the container keeps
-        # the version pinned in gerrit-action/docker/requirements.txt.
+        # the version pinned in gerrit-action/docker/requirements.txt;
+        # that pin can lag behind upstream by weeks-to-months between
+        # PyPI releases, so the default below points at the live
+        # ``main`` branch HEAD instead.
         #
-        # Default: the chained-tip Gerrit change in the open
-        # gerrit_to_platform fix series (change 74275, patchset 2),
-        # which carries:
-        #   * 74276 — Fix(config): Allow duplicate keys in
-        #               replication.config
-        #   * 74275 — Fix(helpers): Support Gerrit 3.x compact change-id
-        # Installing this single ref pulls in the parent change via
-        # git-history.  (74274 — the centralised logging framework —
-        # has already merged to main.)  Bump the trailing digit when
-        # a new patchset lands on any change in the chain (the tip
-        # change number rises with each reroll), or clear the field
-        # once a release ships to PyPI.  To revert: set this input to
-        # an empty string at dispatch time.
+        # Default: ``main`` — clones the upstream gerrit_to_platform
+        # ``main`` branch HEAD at dispatch time and installs it over
+        # the container's pinned release.  This used to point at the
+        # chained-tip Gerrit change ``refs/changes/75/74275/2`` (the
+        # open 74275 + 74276 + 74274 fix series); that change has now
+        # merged to main (see
+        # https://gerrit.linuxfoundation.org/infra/c/releng/
+        # gerrit_to_platform/+/74275) so ``main`` is the equivalent
+        # location.  When a new PyPI release ships that includes
+        # everything we depend on, this default can drop back to an
+        # empty string and the container's pinned release will be
+        # sufficient.
+        #
+        # Override at dispatch time to validate an in-flight change
+        # against the test deployment before it merges (point at
+        # ``refs/changes/<NN>/<num>/<ps>``), test a feature branch,
+        # or pin to a specific SHA for reproducibility.  Set to an
+        # empty string to use the container's pinned PyPI release
+        # without any override.
         description: >-
-          Optional Git ref to install gerrit_to_platform from
-          (branch, tag, SHA, or 'refs/changes/<NN>/<num>/<ps>').
-          Empty leaves the container's pinned release in place.
+          Git ref to install gerrit_to_platform from (branch, tag,
+          SHA, or 'refs/changes/<NN>/<num>/<ps>').  Empty leaves
+          the container's pinned PyPI release in place.
         required: false
-        default: 'refs/changes/75/74275/2'
+        default: 'main'
         type: string
       g2p_install_repo:
         # Source repository for the g2p override install.  Default
