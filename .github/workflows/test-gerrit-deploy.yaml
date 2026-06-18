@@ -500,6 +500,8 @@ jobs:
       - name: "Checkout repository"
         # yamllint disable-line rule:line-length
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: "Parse gerrit-action ref"
         id: gerrit-action-ref
@@ -524,6 +526,7 @@ jobs:
           repository: ${{ steps.gerrit-action-ref.outputs.repository }}
           ref: ${{ steps.gerrit-action-ref.outputs.ref }}
           path: .gerrit-action
+          persist-credentials: false
 
       - name: "Lookup credentials for ${{ matrix.server.slug }}"
         id: credentials
@@ -2005,6 +2008,7 @@ jobs:
         if: always()
         env:
           GITHUB_ORG: ${{ matrix.org.github_org }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "## Reset: $GITHUB_ORG"
@@ -2012,7 +2016,7 @@ jobs:
             echo "| Property | Value |"
             echo "|----------|-------|"
             echo "| GitHub Org | \`$GITHUB_ORG\` |"
-            echo "| Status | ${{ job.status }} |"
+            echo "| Status | ${JOB_STATUS} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   sync-orgs:
@@ -2216,6 +2220,7 @@ jobs:
           TOTAL_COUNT: ${{ steps.mirror.outputs.total-count }}
           INCLUDE_PROJECTS: ${{ matrix.org.include_projects }}
           EXCLUDE_PROJECTS: ${{ matrix.org.exclude_projects }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "## Sync: $GITHUB_ORG"
@@ -2224,7 +2229,7 @@ jobs:
             echo "|----------|-------|"
             echo "| GitHub Org | \`$GITHUB_ORG\` |"
             echo "| Gerrit Server | \`$GERRIT_SERVER\` |"
-            echo "| Status | ${{ job.status }} |"
+            echo "| Status | ${JOB_STATUS} |"
             echo "| Total | $TOTAL_COUNT |"
             echo "| Succeeded | $SUCCESS_COUNT |"
             echo "| Failed | $FAILURE_COUNT |"
@@ -2259,6 +2264,11 @@ jobs:
           RESET_ORGS: ${{ inputs.reset_orgs }}
           SYNC_ORGS: ${{ inputs.sync_orgs }}
           CONFIGURE_G2P: ${{ inputs.configure_g2p }}
+          NEEDS_VALIDATE_RESULT: ${{ needs.validate.result }}
+          NEEDS_PREPARE_RESULT: ${{ needs.prepare.result }}
+          NEEDS_DEPLOY_GERRIT_RESULT: ${{ needs.deploy-gerrit.result }}
+          NEEDS_RESET_ORGS_RESULT: ${{ needs.reset-orgs.result }}
+          NEEDS_SYNC_ORGS_RESULT: ${{ needs.sync-orgs.result }}
         run: |
           # Generate test summary
           {
@@ -2266,29 +2276,29 @@ jobs:
             echo ""
             echo "| Status | Details |"
             echo "|--------|---------|"
-            echo "| Validation | ${{ needs.validate.result }} |"
-            echo "| Preparation | ${{ needs.prepare.result }} |"
+            echo "| Validation | ${NEEDS_VALIDATE_RESULT} |"
+            echo "| Preparation | ${NEEDS_PREPARE_RESULT} |"
             if [ "$PERSIST_MINUTES" != "0" ] && \
                [ "$DEBUG_COUNT" != "0" ]; then
               echo "| Deploy Gerrit ($DEBUG_COUNT) \
-                | ${{ needs.deploy-gerrit.result }} |"
+                | ${NEEDS_DEPLOY_GERRIT_RESULT} |"
             elif [ "$DEBUG_COUNT" = "0" ]; then
               echo "| Deploy Gerrit | skipped (selector: none) |"
             fi
             if [ "$RESET_ORGS" = "true" ]; then
               echo "| Reset Orgs \
-                | ${{ needs.reset-orgs.result }} |"
+                | ${NEEDS_RESET_ORGS_RESULT} |"
             fi
             if [ "$SYNC_ORGS" = "true" ]; then
               echo "| Sync Orgs \
-                | ${{ needs.sync-orgs.result }} |"
+                | ${NEEDS_SYNC_ORGS_RESULT} |"
             fi
             if [ "$CONFIGURE_G2P" = "true" ]; then
               # Reflect the actual deploy-gerrit job outcome
               # (which is where G2P configuration runs) rather
               # than the bare "enabled" flag.  If the deploy job
               # failed or was cancelled, G2P did not succeed.
-              DEPLOY_RESULT="${{ needs.deploy-gerrit.result }}"
+              DEPLOY_RESULT="${NEEDS_DEPLOY_GERRIT_RESULT}"
               case "$DEPLOY_RESULT" in
                 success)
                   G2P_STATUS="✅ succeeded"
