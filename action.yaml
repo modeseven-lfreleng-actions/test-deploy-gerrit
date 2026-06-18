@@ -23,15 +23,30 @@ runs:
     - name: "Friendly Name"
       id: code
       shell: bash
+      env:
+        INPUT_INPUT: ${{ inputs.input }}
       run: |
         # Friendly Name
-        input="${{ inputs.input }}"
+        input="$INPUT_INPUT"
         if [ -z "$input" ]; then
           echo "Error: mandatory input was not set/configured ❌"
           exit 1
         fi
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
+        # Emit the output via a heredoc delimiter so an input value
+        # containing newlines cannot forge additional outputs. The
+        # delimiter is built from shell-builtin randomness (no external
+        # tools such as openssl/uuidgen, which are not guaranteed on
+        # self-hosted runners) and regenerated until it is provably
+        # absent from the value being emitted.
+        delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+        while [[ "$input" == *"$delimiter"* ]]; do
+          delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+        done
+        {
+          printf '%s<<%s\n' 'output' "$delimiter"
+          printf '%s\n' "$input"
+          printf '%s\n' "$delimiter"
+        } >> "$GITHUB_OUTPUT"
         echo "Action received: $input ✅"
         echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
