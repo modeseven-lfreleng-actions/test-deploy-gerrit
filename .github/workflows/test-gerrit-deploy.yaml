@@ -122,9 +122,7 @@ on:
         # When unset, defaults to upstream main branch
         description: "Use gerrit-action from git ref"
         required: false
-        # yamllint disable-line rule:line-length
-        # default: "lfreleng-actions/gerrit-action@main"
-        default: "modeseven-lfreleng-actions/gerrit-action@integration-updates"
+        default: "lfreleng-actions/gerrit-action@main"
         type: string
       configure_g2p:
         # Configures gerrit_to_platform inside the deployed Gerrit
