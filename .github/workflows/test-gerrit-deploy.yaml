@@ -130,7 +130,7 @@ on:
         # Configures gerrit_to_platform inside the deployed Gerrit
         # container. Only effective when persistent sessions are
         # active (selector is not 'none'). The target GitHub org
-        # is derived from the server slug: modeseven-gerrit-<slug>
+        # is taken from the server's github_gerrit_org field.
         description: "Configure Gerrit to Platform (g2p)"
         required: false
         default: true
@@ -883,7 +883,9 @@ jobs:
               ''
             }}
           # G2P (gerrit_to_platform) integration
-          # Target org: modeseven-gerrit-<slug> (must contain "gerrit")
+          # Target org comes from the per-server github_gerrit_org field so
+          # slugs that differ from the org suffix resolve correctly (e.g.
+          # slug "oran" -> org "modeseven-gerrit-o-ran-sc").
           g2p_enable: >-
             ${{ inputs.configure_g2p == true && 'true' || 'false' }}
           g2p_github_token: >-
@@ -891,8 +893,7 @@ jobs:
               inputs.configure_g2p == true &&
                 secrets.G2P_GITHUB_TOKEN || ''
             }}
-          # yamllint disable-line rule:line-length
-          g2p_github_owner: "modeseven-gerrit-${{ matrix.server.slug }}"
+          g2p_github_owner: ${{ matrix.server.github_gerrit_org }}
           g2p_remote_name_style: 'dash'
           g2p_validation_mode: 'warn'
           g2p_org_setup: ${{ inputs.g2p_org_setup }}
