@@ -136,46 +136,14 @@ on:
         default: true
         type: boolean
       rewrite_gitreview:
-        # Rewrites .gitreview inside every replicated/cloned project
-        # so that contributors who 'git clone' from this short-lived
-        # test Gerrit get a .gitreview pointing at the test instance
-        # rather than the upstream production Gerrit it mirrors.
-        #
-        # Modes:
-        #   * 'Leave unchanged'        - skip the rewrite entirely.
-        #                                Useful for debugging
-        #                                replication or comparing
-        #                                source state against
-        #                                upstream where touching
-        #                                .gitreview would muddy the
-        #                                diff.
-        #   * 'Change with new commit' - append a synthetic 'Chore:
-        #                                Rewrite .gitreview for test
-        #                                deployment' commit on top
-        #                                of each branch tip.  The
-        #                                rewrite shows up in 'git
-        #                                log' as its own commit.
-        #   * 'Change by amended commit'
-        #                              - rebuild the existing tip
-        #                                commit in place, preserving
-        #                                its author, committer,
-        #                                date, message and parents,
-        #                                swapping only the tree.  No
-        #                                extra commit appears in the
-        #                                log; the .gitreview blob
-        #                                simply differs from upstream
-        #                                inside the tip commit.
-        #
-        # The target host/port depend on 'remote_access':
-        #   * Bore tunnels   - host=tunnel host, port=tunnel SSH port
-        #   * Tailscale      - host=tag:ci node IP, port left alone
-        #   * None           - host=runner public IPv4, port=local
-        #                      SSH port (deterministic per matrix
-        #                      index).  In 'None' mode nothing
-        #                      outside the runner can actually reach
-        #                      the Gerrit; the rewrite is still
-        #                      performed for consistency and for
-        #                      diagnostic snapshots.
+        # Rewrites .gitreview in every replicated/cloned project so
+        # clones from this short-lived test Gerrit point at the test
+        # instance rather than the upstream production Gerrit.
+        # Modes: 'Leave unchanged' (skip); 'Change with new commit'
+        # (append a synthetic Chore commit per branch tip); 'Change by
+        # amended commit' (rebuild the tip in place, swapping only the
+        # tree). Host/port derive from 'remote_access' (Bore tunnel,
+        # Tailscale node IP, or the runner's public IPv4 for 'None').
         description: "Update .gitreview host and port"
         required: false
         default: "Change by amended commit"
@@ -903,10 +871,13 @@ jobs:
           g2p_remote_name_style: 'dash'
           g2p_validation_mode: 'warn'
           g2p_org_setup: ${{ inputs.g2p_org_setup }}
+          # Base64-encoded JSON array of {github_org, token} entries.
+          # gerrit-action base64-decodes and parses this internally
+          # (see scripts/lib/g2p_config.py::decode_org_tokens).
           g2p_org_token_map: >-
             ${{
               inputs.g2p_org_setup == 'provision' &&
-                secrets.G2P_ORG_TOKENS || ''
+                secrets.ORG_TOKEN_JSON || ''
             }}
 
       # ================================================================
@@ -1986,18 +1957,41 @@ jobs:
 
       - name: "Reset GitHub org: ${{ matrix.org.github_org }}"
         env:
-          ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG_TOKEN_JSON: ${{ secrets.ORG_TOKEN_JSON }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
           VERBOSE_DEBUG: ${{ needs.validate.outputs.effective_debug }}
         run: |
-          # Verify token is available
-          if [ -z "$ORG_ADMIN_TOKEN" ]; then
-            echo "::error::ORG_ADMIN_TOKEN secret" \
-              "is not set or empty"
+          # Resolve this org's admin token from the single
+          # base64-encoded JSON secret ORG_TOKEN_JSON. The secret is
+          # base64-encoded because raw JSON triggers GitHub's console
+          # secret redaction in ways that distort job output; encoding
+          # also stops the individual PATs being partially masked.
+          # Expected decoded shape:
+          #   [{"github_org": "org-name", "token": "github_pat_..."}]
+          if [ -z "$ORG_TOKEN_JSON" ]; then
+            echo "::error::ORG_TOKEN_JSON secret is not set or empty"
             exit 1
           fi
-          echo "Token available:" \
-            "${#ORG_ADMIN_TOKEN} chars"
+          ORG_TOKEN_MAP=$(printf '%s' "$ORG_TOKEN_JSON" \
+            | base64 -d 2>/dev/null) || {
+            echo "::error::Failed to base64-decode ORG_TOKEN_JSON"
+            exit 1
+          }
+          if ! printf '%s' "$ORG_TOKEN_MAP" | jq empty 2>/dev/null; then
+            echo "::error::ORG_TOKEN_JSON is not valid JSON once decoded"
+            exit 1
+          fi
+          ORG_TOKEN=$(printf '%s' "$ORG_TOKEN_MAP" \
+            | jq -r --arg org "$GITHUB_ORG" \
+              'map(select(.github_org == $org)) | .[0].token // empty')
+          if [ -z "$ORG_TOKEN" ]; then
+            echo "::error::No token for org '$GITHUB_ORG' in ORG_TOKEN_JSON"
+            exit 1
+          fi
+          # Mask the decoded token: GitHub only auto-masks the exact
+          # secret value (the base64 blob), not the per-org PAT.
+          echo "::add-mask::$ORG_TOKEN"
+          echo "Resolved admin token for $GITHUB_ORG (${#ORG_TOKEN} chars)"
 
           # Reset (delete all repos from) the GitHub org
           echo "Resetting GitHub org: $GITHUB_ORG"
@@ -2007,7 +2001,7 @@ jobs:
           fi
           gerrit-clone reset \
             --org "$GITHUB_ORG" \
-            --github-token "$ORG_ADMIN_TOKEN" \
+            --github-token "$ORG_TOKEN" \
             --no-confirm \
             "${VERBOSE_ARGS[@]}"
 
@@ -2082,7 +2076,7 @@ jobs:
       - name: "Mirror Gerrit to GitHub: ${{ matrix.org.github_org }}"
         id: mirror
         env:
-          ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG_TOKEN_JSON: ${{ secrets.ORG_TOKEN_JSON }}
           GITHUB_ORG: ${{ matrix.org.github_org }}
           GERRIT_SERVER: ${{ matrix.org.gerrit }}
           MIRROR_OUTPUT_PATH: "/tmp/mirror-${{ matrix.org.github_org }}"
@@ -2094,12 +2088,37 @@ jobs:
           GIT_FILTER_PROJECTS: ${{ inputs.git_filter_projects }}
           GIT_FILTER_TOKENS: ${{ secrets.GIT_FILTER_TOKENS }}
         run: |
-          # Verify token is available
-          if [ -z "$ORG_ADMIN_TOKEN" ]; then
-            echo "::error::ORG_ADMIN_TOKEN secret" \
-              "is not set or empty"
+          # Resolve this org's admin token from the single
+          # base64-encoded JSON secret ORG_TOKEN_JSON. The secret is
+          # base64-encoded because raw JSON triggers GitHub's console
+          # secret redaction in ways that distort job output; encoding
+          # also stops the individual PATs being partially masked.
+          # Expected decoded shape:
+          #   [{"github_org": "org-name", "token": "github_pat_..."}]
+          if [ -z "$ORG_TOKEN_JSON" ]; then
+            echo "::error::ORG_TOKEN_JSON secret is not set or empty"
             exit 1
           fi
+          ORG_TOKEN_MAP=$(printf '%s' "$ORG_TOKEN_JSON" \
+            | base64 -d 2>/dev/null) || {
+            echo "::error::Failed to base64-decode ORG_TOKEN_JSON"
+            exit 1
+          }
+          if ! printf '%s' "$ORG_TOKEN_MAP" | jq empty 2>/dev/null; then
+            echo "::error::ORG_TOKEN_JSON is not valid JSON once decoded"
+            exit 1
+          fi
+          ORG_TOKEN=$(printf '%s' "$ORG_TOKEN_MAP" \
+            | jq -r --arg org "$GITHUB_ORG" \
+              'map(select(.github_org == $org)) | .[0].token // empty')
+          if [ -z "$ORG_TOKEN" ]; then
+            echo "::error::No token for org '$GITHUB_ORG' in ORG_TOKEN_JSON"
+            exit 1
+          fi
+          # Mask the decoded token: GitHub only auto-masks the exact
+          # secret value (the base64 blob), not the per-org PAT.
+          echo "::add-mask::$ORG_TOKEN"
+          echo "Resolved admin token for $GITHUB_ORG (${#ORG_TOKEN} chars)"
 
           # Mirror all repos from Gerrit to GitHub
           # This is idempotent: missing repos are created, existing
@@ -2185,7 +2204,7 @@ jobs:
           gerrit-clone mirror \
             --server "$GERRIT_SERVER" \
             --org "$GITHUB_ORG" \
-            --github-token "$ORG_ADMIN_TOKEN" \
+            --github-token "$ORG_TOKEN" \
             --output-path "$MIRROR_OUTPUT_PATH" \
             --overwrite \
             --no-mirror \

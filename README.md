@@ -390,17 +390,44 @@ validation job checks this alongside the `debug` input and GitHub's
 built-in `RUNNER_DEBUG` flag — if any of the three is active, the
 workflow produces verbose logging.
 
-#### `ORG_ADMIN_TOKEN` (Required for reset/sync)
+#### `ORG_TOKEN_JSON` (Required for reset/sync and G2P provisioning)
 
-A GitHub Personal Access Token (Classic) with the following
-permissions:
+A **base64-encoded** JSON array mapping each target GitHub
+organization to its admin Personal Access Token. A single secret
+covers every org the workflow can reset, sync, or provision.
+
+The secret is base64-encoded because raw JSON triggers GitHub's
+console secret redaction in ways that distort job output, and
+encoding also stops GitHub partially masking the individual tokens.
+
+**Decoded shape:**
+
+```json
+[
+  {"github_org": "modeseven-gerrit-onap", "token": "github_pat_..."},
+  {"github_org": "modeseven-gerrit-lf", "token": "github_pat_..."}
+]
+```
+
+Each token needs the following permissions:
 
 - `repo` — Full control of private repositories
 - `delete_repo` — Delete repositories
 - `admin:org` — Full control of organizations
 
-The reset and sync jobs use this token to delete and recreate
-repositories in the target GitHub organizations.
+The `reset-orgs` and `sync-orgs` jobs base64-decode this secret and
+select the entry whose `github_org` matches the current org; the job
+fails fast if no entry is present. The G2P org provisioning path
+consumes the same secret via `g2p_org_token_map` (gerrit-action
+decodes it internally).
+
+**Encode the JSON before storing it as the secret:**
+
+```bash
+# On Linux/macOS (avoid trailing newlines):
+base64 -w 0 < org-tokens.json   # Linux
+base64 < org-tokens.json         # macOS
+```
 
 ### Repository Variables (continued)
 
